@@ -1,0 +1,20 @@
+{
+  "template": "compact",
+  "locale": "auto",
+  "fallback_locale": "en-US",
+  "theme": "light",
+  "accent_color": "#36594C",
+  "logo_png": null,
+  "strings": {
+    "zh-CN": {
+      "header.setup": "示例应用 · 安装程序",
+      "brand.version": "产品版本 {version}",
+      "phase.ready": "准备安装示例应用"
+    },
+    "en-US": {
+      "header.setup": "Example App · Setup",
+      "brand.version": "Product version {version}",
+      "phase.ready": "Ready to install Example App"
+    }
+  }
+}

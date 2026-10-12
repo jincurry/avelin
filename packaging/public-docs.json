@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "files": [
+    "README.md",
+    "getting-started.md",
+    "architecture.md",
+    "development.md",
+    "roadmap.md",
+    "cli.md",
+    "compatibility.md",
+    "third-party.md",
+    "releasing.md",
+    "schemas/README.md",
+    "schemas/examples/command.json",
+    "schemas/examples/events.json",
+    "schemas/examples/install-plan.json",
+    "schemas/examples/manifest.json",
+    "schemas/examples/receipt.json",
+    "schemas/examples/replay-cancelled.json",
+    "schemas/examples/replay-failed.json",
+    "schemas/examples/replay-succeeded.json",
+    "schemas/examples/replay-unknown.json",
+    "schemas/examples/snapshot.json",
+    "schemas/model.schema.json",
+    "schemas/presentation.example.json",
+    "schemas/presentation.schema.json",
+    "schemas/protocol.schema.json"
+  ]
+}

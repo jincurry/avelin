@@ -1,0 +1,1 @@
+This owned resource has identical bytes in A and B.

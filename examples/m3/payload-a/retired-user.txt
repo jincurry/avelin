@@ -1,0 +1,1 @@
+This A-only resource is modified by the fixture before upgrading and must be preserved.

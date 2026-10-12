@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avelin.dev/schemas/m1/protocol.schema.json",
+  "title": "Avelin task and backend payload drafts",
+  "description": "Backend payloads retain their existing kind/phase/result/code shape. Named-pipe transport additionally authenticates its peer and validates protocol_version=1, task_id and monotonically increasing seq. Offline payload replay does not authenticate the sender or verify installed resources.",
+  "$defs": {
+    "TaskPhase": {
+      "enum": [
+        "Ready",
+        "Preparing",
+        "Installing",
+        "Cancelling",
+        "Finalizing",
+        "Succeeded",
+        "Failed",
+        "Cancelled",
+        "Unknown"
+      ]
+    },
+    "TaskResult": {
+      "enum": [
+        "Succeeded",
+        "Cancelled",
+        "Failed",
+        "Unknown"
+      ]
+    },
+    "TaskSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "completed",
+        "total",
+        "detail"
+      ],
+      "properties": {
+        "phase": {
+          "$ref": "#/$defs/TaskPhase"
+        },
+        "completed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "total": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    },
+    "TaskCommand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command",
+            "install_dir",
+            "desktop_shortcut",
+            "start_menu_shortcut"
+          ],
+          "properties": {
+            "command": {
+              "const": "start"
+            },
+            "install_dir": {
+              "type": "string"
+            },
+            "desktop_shortcut": {
+              "type": "boolean",
+              "description": "The user's desktop shortcut choice for this installation."
+            },
+            "start_menu_shortcut": {
+              "type": "boolean",
+              "description": "The user's Start menu shortcut choice for this installation."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "const": "cancel"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "const": "launch_installed"
+            }
+          }
+        }
+      ]
+    },
+    "BackendEvent": {
+      "description": "Unrelated metadata remains tolerated for existing wire compatibility. Unknown kind/phase/result values and inconsistent counters or result codes are rejected. JSON Schema cannot alone check completed <= total.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "phase",
+            "completed",
+            "total"
+          ],
+          "properties": {
+            "kind": {
+              "const": "progress"
+            },
+            "phase": {
+              "enum": [
+                "preparing",
+                "extracting",
+                "running",
+                "finalizing",
+                "cancelling",
+                "cleanup_completed"
+              ]
+            },
+            "completed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            },
+            "total": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 18446744073709551615
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "cancel_received"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "result",
+            "code"
+          ],
+          "properties": {
+            "kind": {
+              "const": "finish"
+            },
+            "result": {
+              "$ref": "#/$defs/TaskResult"
+            },
+            "code": {
+              "enum": [
+                0,
+                2,
+                3,
+                4
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "const": "Succeeded"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "const": 0
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "const": "Cancelled"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "const": 2
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "const": "Failed"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "const": 3
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "result": {
+                    "const": "Unknown"
+                  }
+                }
+              },
+              "then": {
+                "properties": {
+                  "code": {
+                    "const": 4
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "TaskResponse": {
+      "description": "Independent post-install action feedback; never replaces the confirmed TaskSnapshot terminal result.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "response",
+        "succeeded",
+        "detail"
+      ],
+      "properties": {
+        "response": {
+          "const": "launch_result"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

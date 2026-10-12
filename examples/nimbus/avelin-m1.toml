@@ -1,0 +1,24 @@
+# M1: the UI assets are embedded into the package at build time.
+schema_version = 1
+
+[app]
+id = "dev.avelin.m1.nimbus"
+name = "Nimbus 笔记"
+version = "0.2.0"
+entry = "nimbus-demo.exe"
+
+[payload]
+directory = "payload"
+
+[install]
+directory_name = "AvelinM1Nimbus"
+start_menu_shortcut = false
+
+[ui]
+template = "compact"
+theme = "light"
+locale = "zh-CN"
+fallback_locale = "en-US"
+accent_color = "#245DA8"
+logo = "branding/nimbus.png"
+strings_dir = "locales"

@@ -1,0 +1,24 @@
+# The harness supplies an isolated identity, the sample executable and branding.
+schema_version = 1
+
+[app]
+id = "dev.avelin.m3.nimbus"
+name = "Nimbus 升级样例 A"
+version = "0.3.0"
+entry = "nimbus-a.exe"
+
+[payload]
+directory = "payload-a"
+
+[install]
+directory_name = "AvelinM3Nimbus"
+desktop_shortcut = true
+start_menu_shortcut = true
+
+[ui]
+template = "compact"
+theme = "light"
+locale = "zh-CN"
+fallback_locale = "en-US"
+accent_color = "#245DA8"
+logo = "branding/nimbus.png"

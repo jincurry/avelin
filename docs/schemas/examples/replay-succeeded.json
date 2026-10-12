@@ -1,0 +1,7 @@
+[
+  { "kind": "progress", "phase": "preparing", "completed": 0, "total": 1 },
+  { "kind": "progress", "phase": "extracting", "completed": 1, "total": 1 },
+  { "kind": "progress", "phase": "finalizing", "completed": 1, "total": 1 },
+  { "kind": "finish", "result": "Succeeded", "code": 0 },
+  { "kind": "cancel_received" }
+]

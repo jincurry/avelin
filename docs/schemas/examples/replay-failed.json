@@ -1,0 +1,5 @@
+[
+  { "kind": "progress", "phase": "extracting", "completed": 1, "total": 3 },
+  { "kind": "progress", "phase": "cleanup_completed", "completed": 0, "total": 3 },
+  { "kind": "finish", "result": "Failed", "code": 3 }
+]

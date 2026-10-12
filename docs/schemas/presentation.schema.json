@@ -1,0 +1,1510 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avelin.dev/schemas/m1/presentation.schema.json",
+  "title": "Avelin Presentation",
+  "description": "Optional presentation object embedded in an Avelin manifest. Missing fields use defaults. Complete built-in zh-CN and en-US catalogs are overlaid only by overrides in the same language. Auto detection resolves supported zh/en language tags; an unsupported or absent system locale resolves to fallback_locale. Runtime validation remains required for PNG decoding and resource limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "template": {
+      "type": "string",
+      "const": "compact",
+      "default": "compact"
+    },
+    "locale": {
+      "enum": [
+        "auto",
+        "zh-CN",
+        "en-US"
+      ],
+      "default": "auto"
+    },
+    "fallback_locale": {
+      "enum": [
+        "zh-CN",
+        "en-US"
+      ],
+      "default": "en-US",
+      "description": "Used when automatic system locale detection has no supported match; does not replace individual missing keys with another language."
+    },
+    "theme": {
+      "enum": [
+        "light",
+        "dark"
+      ],
+      "default": "light"
+    },
+    "accent_color": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 7,
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "default": "#36594C",
+      "description": "Opaque brand color. The UI must choose black or white foreground using accent_foreground_rgb and preserve adequate contrast for hover and active states."
+    },
+    "logo_png": {
+      "default": null,
+      "description": "Embedded static PNG bytes, not a path, URL or base64 string. Runtime fully decodes PNG with checksum checking, a 16 MiB decoder allocation limit, a 4 MiB pixel output limit and a 512 KiB cumulative decoded profile/text limit. Width and height must each be 1..1024; APNG and trailing data are rejected.",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 524288,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          }
+        }
+      ]
+    },
+    "strings": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": false,
+      "properties": {
+        "zh-CN": {
+          "$ref": "#/$defs/catalog"
+        },
+        "en-US": {
+          "$ref": "#/$defs/catalog"
+        }
+      },
+      "description": "Partial overrides. Keys are registered; unknown keys, blank values and changed placeholder sets are invalid. Values are plain text; interpolation never interprets argument values as placeholders or markup. Underlying execution diagnostics are not translated."
+    }
+  },
+  "$defs": {
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window.title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {app_name}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:app_name)\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "header.demo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "header.setup": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "brand.version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {version}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:version)\\})*$"
+            },
+            {
+              "pattern": "\\{version\\}"
+            }
+          ]
+        },
+        "footer.brand": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "footer.demo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "footer.install": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "language.switch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "theme.light": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "theme.dark": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "directory.label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "directory.aria": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "directory.browse": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "directory.prompt": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "directory.hint": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "option.desktop": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "option.start_menu": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "consent.demo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "consent.install": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.demo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.install": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.cancel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.retry": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.close": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "menu.cut": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "menu.copy": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "menu.paste": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "menu.select_all": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.ready": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.preparing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.installing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.cancelling": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.succeeded": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.failed": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.cancelled": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.unknown": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.demo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.awaiting_start": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.ready": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.cancelling": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.unknown": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.reported": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "progress.aria": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "progress.working": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "progress.percent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {percent}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:percent)\\})*$"
+            },
+            {
+              "pattern": "\\{percent\\}"
+            }
+          ]
+        },
+        "notice.directory_required": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.clipboard_composition": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.clipboard_input_changed": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.clipboard_no_text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.clipboard_unavailable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.picker_pending": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.picker_unavailable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.operation_active": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.operation_finishing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "error.disconnected": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "error.start_delivery": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "error.cancel_delivery": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "window.uninstall_title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {app_name}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:app_name)\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "header.uninstall": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "footer.uninstall": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "uninstall.confirm_title": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {app_name}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:app_name)\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "uninstall.description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "uninstall.directory": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "consent.uninstall": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.uninstall": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstall_ready": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstall_preparing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstalling": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstall_finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstalled": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.uninstall_failed": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.uninstall_awaiting_start": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.uninstall_finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.uninstall_unknown": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.uninstall_reported": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "progress.uninstall_aria": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.uninstall_active": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "error.uninstall_start_delivery": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.launch": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text. Required placeholder set: {app_name}. Repetition is allowed; all other braces are invalid.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{(?:app_name)\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "action.launching": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.launched": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.launch_failed": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.launch_unavailable": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Plain UI text without placeholders or braces.",
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "window.upgrade_title": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{app_name\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "header.upgrade": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "footer.upgrade": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "upgrade.confirm_title": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{app_name\\})*$"
+            },
+            {
+              "pattern": "\\{app_name\\}"
+            }
+          ]
+        },
+        "upgrade.versions": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^(?:[^{}]|\\{previous_version\\}|\\{version\\})*$"
+            },
+            {
+              "pattern": "\\{previous_version\\}"
+            },
+            {
+              "pattern": "\\{version\\}"
+            }
+          ]
+        },
+        "upgrade.description": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "upgrade.directory": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "consent.upgrade": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "action.upgrade": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgrade_ready": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgrade_preparing": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgrading": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgrade_finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgraded": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "phase.upgrade_failed": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.upgrade_awaiting_start": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.upgrade_finalizing": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.upgrade_unknown": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "description.upgrade_reported": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "progress.upgrade_aria": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.upgrade_active": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "error.upgrade_start_delivery": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.upgrade_launch_failed": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        },
+        "notice.upgrade_launch_unavailable": {
+          "type": "string",
+          "minLength": 1,
+          "allOf": [
+            {
+              "pattern": "\\S"
+            },
+            {
+              "pattern": "^[^{}]*$"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

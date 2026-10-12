@@ -1,0 +1,2 @@
+# transport.rs is shared by the Rust 2024 host and the Rust 2021 NSIS ABI crate.
+style_edition = "2024"

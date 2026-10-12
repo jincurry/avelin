@@ -1,0 +1,14 @@
+schema_version = 1
+
+[app]
+id = "dev.avelin.m0.nimbus"
+name = "Nimbus 笔记 · M0"
+version = "0.1.0"
+entry = "nimbus-demo.exe"
+
+[payload]
+directory = "payload"
+
+[install]
+directory_name = "AvelinM0Nimbus"
+start_menu_shortcut = false

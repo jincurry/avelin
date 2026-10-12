@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "app_id": "dev.avelin.m1.example",
+  "app_name": "M1 Example",
+  "app_version": "0.1.0",
+  "entry": "Example.exe",
+  "directory_name": "AvelinM1Example",
+  "start_menu_shortcut": false,
+  "files": [
+    {
+      "path": "Example.exe",
+      "size": 3,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    }
+  ],
+  "runtime_sha256": null
+}

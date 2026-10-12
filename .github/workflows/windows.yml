@@ -1,0 +1,60 @@
+name: Windows preview validation
+
+# Deliberate manual entry. Committing this file does not authorize a cloud run.
+# Runner provisioning is separate; no tool installer or moving toolchain download.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: avelin-windows-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: [self-hosted, Windows, X64, avelin-tools]
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout selected source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Build fresh source, package and validate normal cycle
+        env:
+          AVELIN_NSIS_ROOT: ${{ vars.AVELIN_NSIS_ROOT }}
+          AVELIN_PYTHON: ${{ vars.AVELIN_PYTHON }}
+        run: |
+          $validationExitCode = 1
+          $privateLog = $null
+          try {
+            $privateDirectory = Join-Path $env:GITHUB_WORKSPACE ('target/m4-ci/private-log-' + [Guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $privateDirectory -ErrorAction Stop
+            $privateLog = Join-Path $privateDirectory 'validation.log'
+            $PSNativeCommandUseErrorActionPreference = $false
+            & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File './scripts/ci-windows.ps1' `
+              -OutputDirectory "target/m4-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
+              -NsisRoot $env:AVELIN_NSIS_ROOT -RustToolchain stable -ExpectedRustVersion 1.97.1 `
+              *> $privateLog
+            $validationExitCode = $LASTEXITCODE
+            if ($null -eq $validationExitCode) { $validationExitCode = 1 }
+          } catch {
+            $validationExitCode = 1
+            if ($privateLog) {
+              try { $_ | Out-String | Add-Content -LiteralPath $privateLog -ErrorAction Stop } catch { }
+            }
+          }
+          if ($validationExitCode -eq 0) {
+            Write-Output 'Windows preview validation passed (exit code 0).'
+          } else {
+            Write-Output "Windows preview validation failed (exit code $validationExitCode). Inspect evidence on the runner."
+          }
+          exit $validationExitCode
+      # Complete evidence stays on the self-hosted runner. Its files can contain
+      # account names, SIDs and local paths; do not upload the evidence tree to a
+      # public repository. Prepare and review public release artifacts separately.

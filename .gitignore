@@ -1,0 +1,34 @@
+/target/
+/work/
+/dist/
+/artifacts/
+**/__pycache__/
+*.pyc
+*.pdb
+/examples/nimbus/payload/nimbus-demo.exe
+
+# Local editor state, credentials and signing material.
+/.idea/
+/.vscode/
+/.env
+/.env.*
+!/.env.example
+*.user
+*.suo
+*.pfx
+*.p12
+*.key
+
+# Keep development history and personal prototype paths locally.
+# Public documentation is an explicit, reviewable set.
+/docs/*
+!/docs/README.md
+!/docs/getting-started.md
+!/docs/architecture.md
+!/docs/development.md
+!/docs/roadmap.md
+!/docs/cli.md
+!/docs/compatibility.md
+!/docs/third-party.md
+!/docs/releasing.md
+!/docs/schemas/

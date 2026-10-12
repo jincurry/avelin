@@ -1,0 +1,501 @@
+{
+  "schema_version": 1,
+  "crates": [
+    {
+      "package": "accesskit",
+      "version": "0.24.1",
+      "vcs_commit": "a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "size": 9723,
+          "url": "https://github.com/AccessKit/accesskit/blob/a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969/LICENSE-APACHE",
+          "commit": "a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969",
+          "path": "upstream/accesskit/0.24.1/LICENSE-APACHE"
+        },
+        {
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "size": 1023,
+          "url": "https://github.com/AccessKit/accesskit/blob/a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969/LICENSE-MIT",
+          "commit": "a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969",
+          "path": "upstream/accesskit/0.24.1/LICENSE-MIT"
+        },
+        {
+          "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308",
+          "size": 1559,
+          "url": "https://github.com/AccessKit/accesskit/blob/a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969/LICENSE.chromium",
+          "commit": "a55d3e1a18bb9ef0e4bccc9083fb13c3e0ad8969",
+          "path": "upstream/accesskit/0.24.1/LICENSE.chromium"
+        }
+      ]
+    },
+    {
+      "package": "accesskit_consumer",
+      "version": "0.38.0",
+      "vcs_commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "size": 9723,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE-APACHE",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_consumer/0.38.0/LICENSE-APACHE"
+        },
+        {
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "size": 1023,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE-MIT",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_consumer/0.38.0/LICENSE-MIT"
+        },
+        {
+          "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308",
+          "size": 1559,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE.chromium",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_consumer/0.38.0/LICENSE.chromium"
+        }
+      ]
+    },
+    {
+      "package": "accesskit_windows",
+      "version": "0.34.0",
+      "vcs_commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "size": 9723,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE-APACHE",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_windows/0.34.0/LICENSE-APACHE"
+        },
+        {
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "size": 1023,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE-MIT",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_windows/0.34.0/LICENSE-MIT"
+        },
+        {
+          "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308",
+          "size": 1559,
+          "url": "https://github.com/AccessKit/accesskit/blob/c88605b96d04431f9c3c792464a0f2f253480e94/LICENSE.chromium",
+          "commit": "c88605b96d04431f9c3c792464a0f2f253480e94",
+          "path": "upstream/accesskit_windows/0.34.0/LICENSE.chromium"
+        }
+      ]
+    },
+    {
+      "package": "gpui-kit",
+      "version": "0.6.1",
+      "vcs_commit": "36b51819deb52c947a79f8de29e0e9175eda7464",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811",
+          "size": 10305,
+          "url": "https://github.com/longbridge/gpui-kit/blob/36b51819deb52c947a79f8de29e0e9175eda7464/LICENSE-APACHE",
+          "commit": "36b51819deb52c947a79f8de29e0e9175eda7464",
+          "path": "upstream/gpui-kit/0.6.1/LICENSE-APACHE"
+        }
+      ]
+    },
+    {
+      "package": "gpui-kit-assets",
+      "version": "0.6.1",
+      "vcs_commit": "dd667dfc2f925b7321dc4aef3dc7049b16ed01a2",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811",
+          "size": 10305,
+          "url": "https://github.com/longbridge/gpui-kit/blob/dd667dfc2f925b7321dc4aef3dc7049b16ed01a2/LICENSE-APACHE",
+          "commit": "dd667dfc2f925b7321dc4aef3dc7049b16ed01a2",
+          "path": "upstream/gpui-kit-assets/0.6.1/LICENSE-APACHE"
+        },
+        {
+          "sha256": "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57",
+          "size": 3208,
+          "url": "https://github.com/longbridge/gpui-kit/blob/dd667dfc2f925b7321dc4aef3dc7049b16ed01a2/crates/assets/LICENSE-LUCIDE",
+          "commit": "dd667dfc2f925b7321dc4aef3dc7049b16ed01a2",
+          "path": "upstream/gpui-kit-assets/0.6.1/crates/assets/LICENSE-LUCIDE"
+        }
+      ]
+    },
+    {
+      "package": "lyon",
+      "version": "1.0.19",
+      "vcs_commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "size": 554,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon/1.0.19/LICENSE-APACHE"
+        },
+        {
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "size": 1080,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon/1.0.19/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "lyon_algorithms",
+      "version": "1.0.21",
+      "vcs_commit": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "size": 554,
+          "url": "https://github.com/nical/lyon/blob/994526f2766c7e9bc5bb16687232fd7e8999dbdf/LICENSE-APACHE",
+          "commit": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+          "path": "upstream/lyon_algorithms/1.0.21/LICENSE-APACHE"
+        },
+        {
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "size": 1080,
+          "url": "https://github.com/nical/lyon/blob/994526f2766c7e9bc5bb16687232fd7e8999dbdf/LICENSE-MIT",
+          "commit": "994526f2766c7e9bc5bb16687232fd7e8999dbdf",
+          "path": "upstream/lyon_algorithms/1.0.21/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "lyon_geom",
+      "version": "1.0.19",
+      "vcs_commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "size": 554,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon_geom/1.0.19/LICENSE-APACHE"
+        },
+        {
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "size": 1080,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon_geom/1.0.19/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "lyon_path",
+      "version": "1.0.19",
+      "vcs_commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "size": 554,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon_path/1.0.19/LICENSE-APACHE"
+        },
+        {
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "size": 1080,
+          "url": "https://github.com/nical/lyon/blob/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT",
+          "commit": "56219c95c658d4f39de7b190d98e57d5773ba241",
+          "path": "upstream/lyon_path/1.0.19/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "lyon_tessellation",
+      "version": "1.0.22",
+      "vcs_commit": "b456b143215a1942a617c4672776b68b9a30feee",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "size": 554,
+          "url": "https://github.com/nical/lyon/blob/b456b143215a1942a617c4672776b68b9a30feee/LICENSE-APACHE",
+          "commit": "b456b143215a1942a617c4672776b68b9a30feee",
+          "path": "upstream/lyon_tessellation/1.0.22/LICENSE-APACHE"
+        },
+        {
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "size": 1080,
+          "url": "https://github.com/nical/lyon/blob/b456b143215a1942a617c4672776b68b9a30feee/LICENSE-MIT",
+          "commit": "b456b143215a1942a617c4672776b68b9a30feee",
+          "path": "upstream/lyon_tessellation/1.0.22/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "mac",
+      "version": "0.1.1",
+      "vcs_commit": null,
+      "version_binding": "Published crate checksum; no VCS metadata",
+      "files": [],
+      "unresolved_reason": "Published mac 0.1.1 and reviewed official upstream omit standalone license text. The actual README declares MIT/Apache-2.0, like rust itself; original README, Cargo declarations and complete unchanged published crate source are preserved. No author-specific full text is invented.",
+      "preserve_source_and_declarations": true,
+      "upstream_review": {
+        "repository": "https://github.com/reem/rust-mac",
+        "license_endpoint": "https://api.github.com/repos/reem/rust-mac/license",
+        "license_endpoint_status": 404,
+        "checked_at_utc": "2026-10-12",
+        "readme_blob": "8669166f6ef2b0c7029cb2d5ba042ac885e20081"
+      }
+    },
+    {
+      "package": "profiling",
+      "version": "1.0.18",
+      "vcs_commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "size": 10818,
+          "url": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+          "path": "upstream/profiling/1.0.18/LICENSE-APACHE"
+        },
+        {
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "size": 1093,
+          "url": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+          "path": "upstream/profiling/1.0.18/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "profiling-procmacros",
+      "version": "1.0.18",
+      "vcs_commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "size": 10818,
+          "url": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+          "path": "upstream/profiling-procmacros/1.0.18/LICENSE-APACHE"
+        },
+        {
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "size": 1093,
+          "url": "https://github.com/aclysma/profiling/blob/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+          "path": "upstream/profiling-procmacros/1.0.18/LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "package": "pulp-wasm-simd-flag",
+      "version": "0.1.1",
+      "vcs_commit": "5eb07fd7b68edf0a5e19f71737d315f72a510295",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9",
+          "size": 1062,
+          "url": "https://github.com/sarah-quinones/pulp/blob/5eb07fd7b68edf0a5e19f71737d315f72a510295/LICENSE",
+          "commit": "5eb07fd7b68edf0a5e19f71737d315f72a510295",
+          "path": "upstream/pulp-wasm-simd-flag/0.1.1/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "rust-i18n-macro",
+      "version": "4.2.2",
+      "vcs_commit": "c47194deeee01c7ce75b883193ed96fc048df235",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "d6fde6c28ecbccfc7f6d97c0badbb14bbea2cc8f5e81a8c1537204bdfed9a6d5",
+          "size": 1067,
+          "url": "https://github.com/longbridge/rust-i18n/blob/c47194deeee01c7ce75b883193ed96fc048df235/LICENSE",
+          "commit": "c47194deeee01c7ce75b883193ed96fc048df235",
+          "path": "upstream/rust-i18n-macro/4.2.2/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "rust-i18n-support",
+      "version": "4.2.2",
+      "vcs_commit": "c47194deeee01c7ce75b883193ed96fc048df235",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "d6fde6c28ecbccfc7f6d97c0badbb14bbea2cc8f5e81a8c1537204bdfed9a6d5",
+          "size": 1067,
+          "url": "https://github.com/longbridge/rust-i18n/blob/c47194deeee01c7ce75b883193ed96fc048df235/LICENSE",
+          "commit": "c47194deeee01c7ce75b883193ed96fc048df235",
+          "path": "upstream/rust-i18n-support/4.2.2/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "seahash",
+      "version": "4.1.0",
+      "vcs_commit": "94b632aeac099031c373599313d5b5f0acbbaec0",
+      "version_binding": "License-only upstream follow-up; source tree unchanged",
+      "files": [
+        {
+          "path": "upstream/seahash/4.1.0/LICENSE",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "size": 1023,
+          "url": "https://gitlab.redox-os.org/api/v4/projects/redox-os%2Fseahash/repository/files/LICENSE/raw?ref=74c02182146d1edd7c91a9e6eddefc7390682a70",
+          "commit": "74c02182146d1edd7c91a9e6eddefc7390682a70"
+        }
+      ],
+      "license_commit": "74c02182146d1edd7c91a9e6eddefc7390682a70",
+      "comparison": {
+        "provider": "gitlab",
+        "path": "upstream/seahash/4.1.0/license-only-comparison.json",
+        "sha256": "34b1717b7c40b0c4ff2e337d7dd2feeacd2c115b03e01e1074c01c53fc92c736",
+        "size": 3717,
+        "url": "https://gitlab.redox-os.org/api/v4/projects/redox-os%2Fseahash/repository/compare?from=94b632aeac099031c373599313d5b5f0acbbaec0&to=74c02182146d1edd7c91a9e6eddefc7390682a70&straight=true",
+        "from_commit": "94b632aeac099031c373599313d5b5f0acbbaec0",
+        "to_commit": "74c02182146d1edd7c91a9e6eddefc7390682a70"
+      }
+    },
+    {
+      "package": "simd_helpers",
+      "version": "0.1.0",
+      "vcs_commit": "ca1a2f84aa386d758e98f8a609d990263932fb85",
+      "version_binding": "License-only upstream follow-up; source tree unchanged",
+      "files": [
+        {
+          "path": "upstream/simd_helpers/0.1.0/LICENSE",
+          "sha256": "d69f24ad84ec2ade64c0b68bdb31b41170e997b158370342056918329cc9af1e",
+          "size": 1069,
+          "url": "https://api.github.com/repos/lu-zero/simd_helpers/contents/LICENSE?ref=82040194cd05affb060bf94d6f19f82a771d07fb",
+          "commit": "82040194cd05affb060bf94d6f19f82a771d07fb"
+        }
+      ],
+      "license_commit": "82040194cd05affb060bf94d6f19f82a771d07fb",
+      "comparison": {
+        "provider": "github",
+        "path": "upstream/simd_helpers/0.1.0/license-only-comparison.json",
+        "sha256": "f631bef971323d56b21acd259a5042748128f1c0da1d738d535605d5ef20383b",
+        "size": 12229,
+        "url": "https://api.github.com/repos/lu-zero/simd_helpers/compare/ca1a2f84aa386d758e98f8a609d990263932fb85...82040194cd05affb060bf94d6f19f82a771d07fb",
+        "from_commit": "ca1a2f84aa386d758e98f8a609d990263932fb85",
+        "to_commit": "82040194cd05affb060bf94d6f19f82a771d07fb"
+      }
+    },
+    {
+      "package": "svg_fmt",
+      "version": "0.4.5",
+      "vcs_commit": "93f414cd572b5c2781df93dbdc068ed13443d05a",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "7e98bed7f100747aaae7d82ab94fbe6b76fd6b84b09a3aaa413bff8196d0fbb1",
+          "size": 1070,
+          "url": "https://github.com/nical/rust_debug/blob/93f414cd572b5c2781df93dbdc068ed13443d05a/LICENSE",
+          "commit": "93f414cd572b5c2781df93dbdc068ed13443d05a",
+          "path": "upstream/svg_fmt/0.4.5/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "taffy",
+      "version": "0.13.0",
+      "vcs_commit": "45a56299d366ddb383e593a1f0372158d00e8530",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a",
+          "size": 1100,
+          "url": "https://github.com/DioxusLabs/taffy/blob/45a56299d366ddb383e593a1f0372158d00e8530/LICENSE",
+          "commit": "45a56299d366ddb383e593a1f0372158d00e8530",
+          "path": "upstream/taffy/0.13.0/LICENSE"
+        }
+      ]
+    },
+    {
+      "package": "zune-core",
+      "version": "0.4.12",
+      "vcs_commit": "f8fbb123d5ed04441e8324a555bfcda0cb1bd28f",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352",
+          "size": 818,
+          "url": "https://github.com/etemesi254/zune-image/blob/f8fbb123d5ed04441e8324a555bfcda0cb1bd28f/LICENSE-ZLIB",
+          "commit": "f8fbb123d5ed04441e8324a555bfcda0cb1bd28f",
+          "path": "upstream/zune-core/0.4.12/LICENSE-ZLIB"
+        },
+        {
+          "sha256": "c6dff146a9f31848ac296faa5a08a4253caf2c384c86f906dc99e7fc0a39cc8c",
+          "size": 357,
+          "url": "https://github.com/etemesi254/zune-image/blob/f8fbb123d5ed04441e8324a555bfcda0cb1bd28f/LICENSE.md",
+          "commit": "f8fbb123d5ed04441e8324a555bfcda0cb1bd28f",
+          "path": "upstream/zune-core/0.4.12/LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package": "zune-inflate",
+      "version": "0.2.54",
+      "vcs_commit": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352",
+          "size": 818,
+          "url": "https://github.com/etemesi254/zune-image/blob/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+          "commit": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+          "path": "upstream/zune-inflate/0.2.54/LICENSE-ZLIB"
+        },
+        {
+          "sha256": "e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de",
+          "size": 384,
+          "url": "https://github.com/etemesi254/zune-image/blob/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE.md",
+          "commit": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+          "path": "upstream/zune-inflate/0.2.54/LICENSE.md"
+        }
+      ]
+    },
+    {
+      "package": "zune-jpeg",
+      "version": "0.4.21",
+      "vcs_commit": "fa2c767a01d7d9373911d0bf63e0588553d67e0e",
+      "version_binding": "Cargo .cargo_vcs_info.json exact commit",
+      "files": [
+        {
+          "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352",
+          "size": 818,
+          "url": "https://github.com/etemesi254/zune-image/blob/fa2c767a01d7d9373911d0bf63e0588553d67e0e/LICENSE-ZLIB",
+          "commit": "fa2c767a01d7d9373911d0bf63e0588553d67e0e",
+          "path": "upstream/zune-jpeg/0.4.21/LICENSE-ZLIB"
+        },
+        {
+          "sha256": "c6dff146a9f31848ac296faa5a08a4253caf2c384c86f906dc99e7fc0a39cc8c",
+          "size": 357,
+          "url": "https://github.com/etemesi254/zune-image/blob/fa2c767a01d7d9373911d0bf63e0588553d67e0e/LICENSE.md",
+          "commit": "fa2c767a01d7d9373911d0bf63e0588553d67e0e",
+          "path": "upstream/zune-jpeg/0.4.21/LICENSE.md"
+        }
+      ]
+    }
+  ],
+  "archives": [
+    {
+      "component": "NSIS 3.12",
+      "path": "nsis-3.12-src.tar.bz2",
+      "url": "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12-src.tar.bz2",
+      "sha256": "f3ed7a8e4aa2cf4e8cf47d3b563a02559e0cb4934db2662b2f9661b824e2b186",
+      "size": 1818389,
+      "retrieved_at_utc": "2026-10-12",
+      "verification": "Official project release source; local COPYING comparison performed by collector; no claim of reproducible NSIS executable build"
+    }
+  ]
+}

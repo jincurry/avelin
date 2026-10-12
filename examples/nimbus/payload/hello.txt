@@ -1,0 +1,2 @@
+Hello from Avelin M0.
+This file is managed by the sample installer.

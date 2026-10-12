@@ -1,0 +1,23 @@
+schema_version = 1
+
+[app]
+id = "dev.avelin.m3.nimbus"
+name = "Nimbus 升级样例 B"
+version = "0.4.0"
+entry = "bin/nimbus-b.exe"
+
+[payload]
+directory = "payload-b"
+
+[install]
+directory_name = "AvelinM3Nimbus"
+desktop_shortcut = true
+start_menu_shortcut = true
+
+[ui]
+template = "compact"
+theme = "light"
+locale = "zh-CN"
+fallback_locale = "en-US"
+accent_color = "#36594C"
+logo = "branding/nimbus.png"

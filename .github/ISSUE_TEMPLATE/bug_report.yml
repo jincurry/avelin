@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible Avelin problem
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version and environment
+      description: Avelin version or commit, Windows version, and GUI or silent entry. Omit account and device identifiers.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal example and remove private paths, credentials and application data.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include only relevant, reviewed output. Do not upload full installation evidence directories.

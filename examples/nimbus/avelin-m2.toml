@@ -1,0 +1,25 @@
+# M2: current-user shortcuts, branded uninstall, silent entry and safe reinstall.
+schema_version = 1
+
+[app]
+id = "dev.avelin.m2.nimbus"
+name = "Nimbus 笔记"
+version = "0.3.0"
+entry = "nimbus-demo.exe"
+
+[payload]
+directory = "payload"
+
+[install]
+directory_name = "AvelinM2Nimbus"
+desktop_shortcut = true
+start_menu_shortcut = true
+
+[ui]
+template = "compact"
+theme = "light"
+locale = "zh-CN"
+fallback_locale = "en-US"
+accent_color = "#245DA8"
+logo = "branding/nimbus.png"
+strings_dir = "locales"

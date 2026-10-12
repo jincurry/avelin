@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "task_id": "m1-example-install",
+  "operation": "install",
+  "app_id": "dev.avelin.m1.example",
+  "app_version": "0.1.0",
+  "install_dir": "C:\\AvelinM1Example",
+  "user_sid": "S-1-5-21-100-100-100-1001",
+  "manifest_sha256": "18921fcf49f28924a1802434b8b171ebc0561213e9e77596bec89de10da78366",
+  "payload_file_count": 1,
+  "payload_bytes": 3,
+  "start_menu_shortcut": false
+}

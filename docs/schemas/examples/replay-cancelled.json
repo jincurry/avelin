@@ -1,0 +1,7 @@
+[
+  { "kind": "progress", "phase": "extracting", "completed": 1, "total": 3 },
+  { "kind": "cancel_received" },
+  { "kind": "progress", "phase": "cancelling", "completed": 1, "total": 3 },
+  { "kind": "progress", "phase": "cleanup_completed", "completed": 0, "total": 3 },
+  { "kind": "finish", "result": "Cancelled", "code": 2 }
+]

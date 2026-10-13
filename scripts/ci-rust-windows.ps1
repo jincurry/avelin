@@ -163,7 +163,7 @@ try {
     Save (Join-Path $runRoot 'nsis-source-inventory.json') $nsisInventory
     $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion; nsis_version = $nsisVersion; nsis_root = $nsisRootPath; nsis_source_inventory_sha256 = Hash (Join-Path $runRoot 'nsis-source-inventory.json') }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/windows-shell-link.ps1')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })

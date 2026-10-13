@@ -102,7 +102,7 @@ $public = [ordered]@{
     package_sha256 = $null; failed_command = $null; last_command = $null; last_command_status = $null
     completed_commands = 0; failure_category = 'preparation_or_invocation_failed'
     error_codes = @(ReasonCodes $report['failure']); user_shell_folders = @()
-    lifecycle = [ordered]@{ status = $null; completed_cases = @(); next_uncompleted_case = $null; error_codes = @(ReasonCodes $lifecycle['failure']); failure_trace = @(); last_process = $null; last_task = $null }
+    lifecycle = [ordered]@{ status = $null; completed_cases = @(); next_uncompleted_case = $null; error_codes = @(ReasonCodes $lifecycle['failure']); failure_trace = @(); shortcut_checks = @(); last_process = $null; last_task = $null }
 }
 if ($ValidationExitCode -eq 0 -and $report['status'] -ceq 'PASSED') { $public.status = 'PASSED'; $public.failure_category = $null }
 elseif ($report.Count) { $public.failure_category = 'verification_failed_after_command' }
@@ -131,6 +131,21 @@ foreach ($trace in @($lifecycle['failure_trace'])) {
     if ($trace -isnot [Collections.IDictionary]) { continue }
     $name = SelectEnum $trace['function'] $functionNames; $line = Number $trace['line']
     if ($name -and $line -gt 0 -and $line -lt 10000) { $public.lifecycle.failure_trace += @{ function = $name; line = $line } }
+}
+$shortcutFields = @('target_matches', 'arguments_empty', 'working_directory_matches', 'target_empty', 'working_directory_empty', 'target_exists', 'working_directory_exists', 'target_contains_question_mark', 'working_directory_contains_question_mark', 'target_has_short_component')
+foreach ($label in @('installed-a', 'upgraded-b', 'reinstalled-b', 'migration-installed-a', 'migration-upgraded-b', 'after-commit-installed', 'after-commit-installed-b', 'rollback-installed')) {
+    foreach ($kind in @('desktop', 'start_menu')) {
+        $name = "$label-$kind"
+        $check = ReadJson "lifecycle/$name.shortcut-check.json"
+        if ($check['kind'] -cne $kind) { continue }
+        $projected = [ordered]@{ name = $name; kind = $kind }
+        $valid = $true
+        foreach ($field in $shortcutFields) {
+            if ($check[$field] -isnot [bool]) { $valid = $false; break }
+            $projected[$field] = $check[$field]
+        }
+        if ($valid) { $public.lifecycle.shortcut_checks += $projected }
+    }
 }
 $latestProcess = $null
 foreach ($name in $processNames) {

@@ -728,8 +728,8 @@ mod tests {
             },
             core::Interface,
         };
-        let working = std::env::temp_dir().join("Avelin 快捷方式空格");
-        let target = working.join("应用.exe");
+        let working = std::env::temp_dir().join("Avelin 快捷方式空格 🦀 العربية");
+        let target = working.join("应用 🦀.exe");
         let bytes = shortcut_bytes(&target, &working).unwrap();
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
@@ -756,5 +756,70 @@ mod tests {
             }
             CoUninitialize();
         }
+    }
+
+    #[test]
+    fn staged_shell_link_resolves_after_the_unicode_target_is_published() {
+        use std::fs;
+        use windows::{
+            Win32::{
+                System::Com::{
+                    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance,
+                    CoInitializeEx, CoUninitialize, IPersistFile, STGM_READ,
+                },
+                UI::Shell::{IShellLinkW, ShellLink},
+            },
+            core::{Interface, PCWSTR},
+        };
+        let root = std::env::temp_dir().join(format!("avelin-link-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let working = root.join("installed 中文 🦀 العربية");
+        fs::create_dir(&working).unwrap();
+        let target = working.join("app.exe");
+        let shortcut = root.join("sample.lnk");
+        assert!(!target.exists());
+        // Deployment stages links before publishing the payload. Verify the
+        // persisted link through the Unicode file interface after publication,
+        // including characters outside legacy ANSI code pages.
+        let bytes = shortcut_bytes(&target, &working).unwrap();
+        fs::write(&shortcut, &bytes).unwrap();
+        fs::write(&target, b"shortcut target fixture; never executed").unwrap();
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+            {
+                let link: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                let persist: IPersistFile = link.cast().unwrap();
+                persist
+                    .Load(PCWSTR(wide(shortcut.to_str().unwrap()).as_ptr()), STGM_READ)
+                    .unwrap();
+                for flags in [0, 4] {
+                    let mut actual = [0u16; 1024];
+                    link.GetPath(&mut actual, ptr::null_mut(), flags).unwrap();
+                    let end = actual.iter().position(|v| *v == 0).unwrap();
+                    assert_eq!(
+                        String::from_utf16(&actual[..end]).unwrap(),
+                        target.to_str().unwrap(),
+                        "GetPath flags={flags}"
+                    );
+                }
+                let mut actual = [0u16; 1024];
+                link.GetWorkingDirectory(&mut actual).unwrap();
+                let end = actual.iter().position(|v| *v == 0).unwrap();
+                assert_eq!(
+                    String::from_utf16(&actual[..end]).unwrap(),
+                    working.to_str().unwrap()
+                );
+                let mut arguments = [0u16; 1024];
+                link.GetArguments(&mut arguments).unwrap();
+                assert_eq!(arguments[0], 0);
+            }
+            CoUninitialize();
+        }
+        assert_eq!(fs::read(&shortcut).unwrap(), bytes);
+        fs::remove_file(&shortcut).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::remove_dir(&working).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
 }

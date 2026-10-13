@@ -281,19 +281,30 @@ function VerifyInstalled([object]$Package, [object]$Report, [string]$Label, [str
     }
     $resident = Join-Path $script:InstallRoot '.avelin\avelin-app.exe'; $uninstaller = Join-Path $script:InstallRoot 'uninstall.exe'; $manifest = Join-Path $script:InstallRoot '.avelin\manifest.json'
     Require ((Hash $resident) -ceq (Hash $script:RuntimeBinary) -and (Hash $uninstaller) -ceq $receipt.uninstaller_sha256 -and (Hash $manifest) -ceq $Package.manifest_file_sha256) 'Installed runtime/uninstaller/manifest integrity differs'
-    $shell = New-Object -ComObject WScript.Shell
-    try {
-        $links = foreach ($kind in $ShortcutKinds) {
-            $path = if ($kind -ceq 'desktop') { $script:DesktopPath } else { $script:StartMenuPath }
-            $records = @($receipt.shortcuts | Where-Object kind -CEQ $kind)
-            Require ($records.Count -eq 1 -and (SamePath $records[0].path $path) -and (Hash $path) -ceq $records[0].sha256 -and (SamePath $records[0].target (Join-Path $script:InstallRoot $Package.manifest.entry))) 'Shortcut ownership mismatch'
-            $link = $shell.CreateShortcut($path)
-            try {
-                Require ((SamePath $link.TargetPath (Join-Path $script:InstallRoot $Package.manifest.entry)) -and $link.Arguments -ceq '' -and (SamePath $link.WorkingDirectory $script:InstallRoot)) 'Actual shortcut target/arguments/workdir differ'
-                @{ kind = $kind; path = $path; sha256 = Hash $path; target = $link.TargetPath; arguments = $link.Arguments; working_directory = $link.WorkingDirectory }
-            } finally { $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }
+    $links = foreach ($kind in $ShortcutKinds) {
+        $path = if ($kind -ceq 'desktop') { $script:DesktopPath } else { $script:StartMenuPath }
+        $records = @($receipt.shortcuts | Where-Object kind -CEQ $kind)
+        Require ($records.Count -eq 1 -and (SamePath $records[0].path $path) -and (Hash $path) -ceq $records[0].sha256 -and (SamePath $records[0].target (Join-Path $script:InstallRoot $Package.manifest.entry))) 'Shortcut ownership mismatch'
+        # WScript.Shell converts these properties through the system ANSI
+        # code page. Read the persisted link through IShellLinkW instead.
+        $link = [AvelinAcceptance.ShellLink]::Read($path)
+        $shortcutCheck = [ordered]@{
+            kind = $kind
+            target_matches = -not [string]::IsNullOrEmpty($link.TargetPath) -and (SamePath $link.TargetPath (Join-Path $script:InstallRoot $Package.manifest.entry))
+            arguments_empty = $link.Arguments -ceq ''
+            working_directory_matches = -not [string]::IsNullOrEmpty($link.WorkingDirectory) -and (SamePath $link.WorkingDirectory $script:InstallRoot)
+            target_empty = [string]::IsNullOrEmpty($link.TargetPath)
+            working_directory_empty = [string]::IsNullOrEmpty($link.WorkingDirectory)
+            target_exists = [IO.File]::Exists($link.TargetPath)
+            working_directory_exists = [IO.Directory]::Exists($link.WorkingDirectory)
+            target_contains_question_mark = $link.TargetPath.Contains('?')
+            working_directory_contains_question_mark = $link.WorkingDirectory.Contains('?')
+            target_has_short_component = $link.TargetPath -match '(?i)(^|\\)[^\\]*~[0-9]+(\\|$)'
         }
-    } finally { $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+        Save "$Label-$kind.shortcut-check.json" $shortcutCheck
+        Require ($shortcutCheck.target_matches -and $shortcutCheck.arguments_empty -and $shortcutCheck.working_directory_matches) 'Actual shortcut target/arguments/workdir differ'
+        @{ kind = $kind; path = $path; sha256 = Hash $path; target = $link.TargetPath; arguments = $link.Arguments; working_directory = $link.WorkingDirectory }
+    }
     $registration = @(RegistryState | Where-Object exists); Require ($registration.Count -gt 0) 'Registration missing'
     foreach ($record in $registration) {
         $v = $record.values
@@ -329,9 +340,7 @@ function ArchiveOwned([string]$Path, [string]$Label, [string]$ExpectedHash) {
 }
 function ModifyShortcut([string]$Path, [string]$Label) {
     Require ((SamePath $Path $script:DesktopPath) -or (SamePath $Path $script:StartMenuPath)) 'Unexpected shortcut mutation'
-    $shell = New-Object -ComObject WScript.Shell; $link = $null
-    try { $link = $shell.CreateShortcut($Path); $link.Description = "User customization $Label $($script:AppId)"; $link.Save() }
-    finally { if ($link) { $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($link) }; $null = [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
+    [AvelinAcceptance.ShellLink]::SetDescription($Path, "User customization $Label $($script:AppId)")
     return Hash $Path
 }
 function UninstallRegistered([object]$Package, [string]$Label) {
@@ -536,6 +545,7 @@ function UnknownUpgradeFixture([ValidateSet('after-commit', 'rollback')][string]
 }
 
 Require ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) 'This harness requires Windows'
+. (Join-Path $PSScriptRoot 'windows-shell-link.ps1')
 Require (([bool]$Nsis) -eq ([bool]$Bridge)) 'Specify both Nsis and Bridge to include the optional migration case'
 $projectRoot = Full (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $script:RunRoot = Inside $OutputRoot (Join-Path $projectRoot 'target')

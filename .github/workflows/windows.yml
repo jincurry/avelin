@@ -4,6 +4,15 @@ name: Windows preview validation
 # Runner provisioning is separate; no tool installer or moving toolchain download.
 on:
   workflow_dispatch:
+    inputs:
+      engine:
+        description: Engine to validate on the provisioned Windows runner
+        required: true
+        default: nsis
+        type: choice
+        options:
+          - nsis
+          - rust
 
 permissions:
   contents: read
@@ -25,10 +34,11 @@ jobs:
         with:
           persist-credentials: false
           clean: true
-      - name: Build fresh source, package and validate normal cycle
+      - name: Build fresh source, package and validate selected engine
         env:
           AVELIN_NSIS_ROOT: ${{ vars.AVELIN_NSIS_ROOT }}
           AVELIN_PYTHON: ${{ vars.AVELIN_PYTHON }}
+          AVELIN_CI_ENGINE: ${{ inputs.engine }}
         run: |
           $validationExitCode = 1
           $privateLog = $null
@@ -37,7 +47,12 @@ jobs:
             $null = New-Item -ItemType Directory -Path $privateDirectory -ErrorAction Stop
             $privateLog = Join-Path $privateDirectory 'validation.log'
             $PSNativeCommandUseErrorActionPreference = $false
-            & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File './scripts/ci-windows.ps1' `
+            $entry = switch ($env:AVELIN_CI_ENGINE) {
+              'nsis' { './scripts/ci-windows.ps1' }
+              'rust' { './scripts/ci-rust-windows.ps1' }
+              default { throw 'Unknown engine selection.' }
+            }
+            & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File $entry `
               -OutputDirectory "target/m4-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT" `
               -NsisRoot $env:AVELIN_NSIS_ROOT -RustToolchain stable -ExpectedRustVersion 1.97.1 `
               *> $privateLog

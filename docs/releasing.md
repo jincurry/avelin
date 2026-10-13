@@ -2,7 +2,7 @@
 
 ## 源码仓库
 
-首次公开可以先提供当前 NSIS 预览源码。仓库已配置 MIT、贡献说明、公开文档和源码检查；GitHub 创建、可见性、分支与推送由维护者自行处理。
+仓库提供默认 NSIS 与可选 Rust 引擎的预览源码，包含 MIT、贡献说明、公开文档和源码检查。源码提交、工具包生成和公开 Release 分别记录版本与验证结果。
 
 提交前：
 
@@ -21,13 +21,39 @@ git diff --cached --stat
 
 已有本地开发包不能直接视为公开 Release 附件。完整构建证据可能含构建路径、Windows 用户 SID、机器信息和原始 Cargo 元数据；上传前检查实际附件内容。
 
-1. 从明确的源码版本构建配套 runtime、CLI、bridge 和样例。
+1. 从明确的源码版本构建配套 runtime、CLI、样例及所选后端：Rust 使用 x64 worker，NSIS 使用 x86 bridge。
 2. 用 `scripts/collect-third-party.py` 收集锁定依赖和工具许可材料，并核验输出。
-3. 用 `scripts/package-devkit.ps1` 包装；公共文档从明确清单复制，并附项目 LICENSE/NOTICE。
+3. Rust 使用 `scripts/package-rust-devkit.ps1`，NSIS 使用 `scripts/package-devkit.ps1`；公共文档从明确清单复制，并附项目 LICENSE/NOTICE。
 4. 校验 HASHES 与 ZIP 摘要，在新测试目录验证安装、升级、启动和卸载。
 5. 复核附件中的个人信息、第三方声明、发行身份和签名安排，再发布预览版本。
 
-完整链入口为 `scripts/ci-windows.ps1`，见[开发指南](development.md)。自托管 workflow 将完整日志和证据留在本次 runner 工作目录；需要长期保存时自行在 runner 端归档，后续 checkout 可能清理工作目录。普通 PR 只运行 hosted 源码检查。
+### Rust 工具包
+
+在已构建 Release 组件的仓库中，先生成当前锁文件的第三方材料。现有收集器同时记录两个后端，因此这一步仍需要 NSIS 3.12；生成后的 Rust 工具包及其构包命令不需要 NSIS。
+
+```powershell
+python scripts/collect-third-party.py --project-root . --nsis-root 'C:/Program Files (x86)/NSIS' --output target/rust-licenses-new
+pwsh -NoProfile -File scripts/package-rust-devkit.ps1 `
+  -CliPath target/release/avelin-cli.exe `
+  -RuntimePath target/release/avelin-app.exe `
+  -RustWorkerPath target/release/avelin-engine.exe `
+  -SamplePath target/release/nimbus-demo.exe `
+  -LicenseDirectory target/rust-licenses-new `
+  -OutputDirectory target/rust-package-new
+pwsh -NoProfile -File scripts/Verify-RustDevKit.ps1 `
+  -KitDirectory target/rust-package-new/Avelin-Rust-DeveloperKit `
+  -ZipPath target/rust-package-new/Avelin-Rust-DeveloperKit.zip
+```
+
+每一步成功后再执行下一步。打包输出目录必须不存在。脚本验证组件、许可材料及公开文档清单，构建演示 Setup，并生成逐文件摘要、源码快照及 ZIP；它不执行安装或发布。独立验证器核对文件集合、字节数和摘要，也可核对 ZIP。摘要证明与清单一致，不证明可信发布者身份。
+
+解压工具包后，`bin/` 内配套 CLI、runtime、worker 可直接使用；示例及构包命令见包内 README。`SOURCE-SNAPSHOT.json` 记录打包时源码字节，不能替代可复现构建证明。完整原始第三方材料保留在 `third-party/`，不要把它误当成已脱敏的公开附件。
+
+### 完整验收入口
+
+Rust 使用 `scripts/ci-rust-windows.ps1`，NSIS 保留 `scripts/ci-windows.ps1`，见[开发指南](development.md#维护者完整工具包验收)。Rust 入口从源码测试与构建开始，采集依赖材料、打包并解压校验，再使用解压组件运行 19 项生命周期和 6 项中断验收。
+
+`.github/workflows/rust-windows.yml` 提供 GitHub 托管 Windows 入口；`.github/workflows/windows.yml` 保留手动自托管入口。完整本机日志可能包含路径、SID 和测试资源，不作为公开附件自动上传；云端执行结果以对应源码提交的实际运行状态为准。自托管 runner 的完整证据需在后续 checkout 清理工作目录前自行归档。
 
 ## 版本与结论
 

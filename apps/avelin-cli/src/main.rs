@@ -2,16 +2,23 @@ mod builder;
 mod components;
 mod diagnose;
 mod init;
+mod native_builder;
 mod presentation_config;
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::{io::Read, path::PathBuf};
 
 #[derive(Parser)]
-#[command(version, about = "Avelin controlled NSIS builder")]
+#[command(version, about = "Avelin Windows installer builder")]
 struct Args {
     #[command(subcommand)]
     command: Command,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum Engine {
+    #[default]
+    Nsis,
+    Rust,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -57,12 +64,18 @@ enum Command {
     },
     /// Build a new unsigned Setup using colocated or explicitly supplied components.
     Build {
+        /// Installation backend; the runtime and package configuration are shared.
+        #[arg(long, value_enum, default_value_t = Engine::Nsis)]
+        engine: Engine,
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
         runtime: Option<PathBuf>,
+        /// Rust worker executable; otherwise resolved beside avelin-cli.exe.
+        #[arg(long)]
+        rust_worker: Option<PathBuf>,
         #[arg(long)]
         bridge: Option<PathBuf>,
         #[arg(long)]
@@ -126,12 +139,87 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::Build {
+            engine,
             config,
             output,
             runtime,
+            rust_worker,
             bridge,
             nsis,
-        } => builder::build(&config, &output, runtime, bridge, nsis)?,
+        } => {
+            validate_engine_components(engine, &rust_worker, &bridge, &nsis)?;
+            match engine {
+                Engine::Nsis => builder::build(&config, &output, runtime, bridge, nsis)?,
+                Engine::Rust => native_builder::build(&config, &output, runtime, rust_worker)?,
+            }
+        }
     }
     Ok(())
+}
+
+fn validate_engine_components(
+    engine: Engine,
+    rust_worker: &Option<PathBuf>,
+    bridge: &Option<PathBuf>,
+    nsis: &Option<PathBuf>,
+) -> Result<()> {
+    match engine {
+        Engine::Nsis => ensure!(
+            rust_worker.is_none(),
+            "--rust-worker requires --engine rust"
+        ),
+        Engine::Rust => ensure!(
+            bridge.is_none() && nsis.is_none(),
+            "--engine rust does not accept --bridge or --nsis"
+        ),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn existing_build_defaults_to_nsis_and_rust_is_explicit() {
+        let parse = |extra: &[&str]| {
+            Args::try_parse_from(
+                [
+                    "avelin-cli",
+                    "build",
+                    "--config",
+                    "avelin.toml",
+                    "--output",
+                    "Setup.exe",
+                ]
+                .into_iter()
+                .chain(extra.iter().copied()),
+            )
+        };
+        assert!(matches!(
+            parse(&[]).unwrap().command,
+            Command::Build {
+                engine: Engine::Nsis,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["--engine", "rust"]).unwrap().command,
+            Command::Build {
+                engine: Engine::Rust,
+                ..
+            }
+        ));
+        assert!(parse(&["--engine", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn engine_specific_arguments_cannot_be_silently_ignored() {
+        let some = Some(PathBuf::from("component.exe"));
+        assert!(validate_engine_components(Engine::Nsis, &some, &None, &None).is_err());
+        assert!(validate_engine_components(Engine::Rust, &None, &some, &None).is_err());
+        assert!(validate_engine_components(Engine::Rust, &some, &None, &some).is_err());
+        assert!(validate_engine_components(Engine::Rust, &some, &None, &None).is_ok());
+        assert!(validate_engine_components(Engine::Nsis, &None, &some, &some).is_ok());
+    }
 }

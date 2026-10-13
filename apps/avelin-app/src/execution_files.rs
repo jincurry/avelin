@@ -1009,12 +1009,14 @@ mod tests {
         let mut fixture = Fixture::new();
         let name = format!("avelin-search-{}.dll", uuid::Uuid::new_v4().simple());
         fixture.file(&name, b"not a portable executable");
+        // This module is shared by the coordinator and native worker. Libtest
+        // omits the crate name but retains the embedding module's namespace.
+        let test_name = format!(
+            "{}::dll_search_initialization_is_confined_to_child",
+            module_path!().split_once("::").unwrap().1
+        );
         let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "execution_files::tests::dll_search_initialization_is_confined_to_child",
-                "--nocapture",
-            ])
+            .args(["--exact", &test_name, "--nocapture"])
             .env(MARKER, &name)
             .current_dir(&fixture.root)
             .output()

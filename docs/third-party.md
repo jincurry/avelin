@@ -32,6 +32,8 @@ python scripts/collect-third-party.py --verify target/third-party-new
 
 输出使用空或新目录，生成器不构建、不安装、不联网。它保存实际许可/NOTICE、声明、来源、明列组件的源码，以及逐文件 FILES.json。校验通过只表示材料与清单字节一致，不是法律认证。
 
+x64 的依赖可达范围以 `avelin-app`、`avelin-cli` 和 `avelin-engine` 为入口，x86 另记录 NSIS bridge。Rust 工具包要求材料包含 worker 入口；不能直接复用未记录 worker 的旧清单。收集器目前保留两个后端的完整材料，所以即使只分发 Rust 工具包，采集阶段仍需要 NSIS 3.12。
+
 当前已核验材料覆盖 534 个 Windows 图依赖和 976 条实际许可文本；更新锁文件后应重新采集，不能继承旧数字。仅在锁文件、未进入采集图的包另列。
 
 ## 源码公开与二进制分发

@@ -30,13 +30,36 @@ avelin-cli check --config .\project\avelin.toml
 
 ## 检查与构建
 
-`check --config <avelin.toml>` 读取并验证已有配置、payload 和品牌资源，成功仍输出 Manifest JSON。它不要求 NSIS、runtime 或 bridge；配置有效不代表构建依赖已齐备。
+`check --config <avelin.toml>` 读取并验证已有配置、payload 和品牌资源，成功仍输出 Manifest JSON。它不要求 NSIS、runtime、bridge 或 Rust worker；配置有效不代表构建依赖已齐备。
 
 ```powershell
 avelin-cli build --config .\project\avelin.toml --output .\out\Notes-Setup.exe
 ```
 
-组件解析顺序：
+`build --engine nsis|rust` 选择执行后端，默认是 `nsis`。未修改的旧构包命令继续使用 NSIS；引擎选项不写入应用 TOML，也不改变应用身份或版本规则。
+
+### Rust 原生后端
+
+```powershell
+avelin-cli build --engine rust --config .\project\avelin.toml `
+  --runtime .\tools\avelin-app.exe --rust-worker .\tools\avelin-engine.exe `
+  --output .\out\Notes-Rust-Setup.exe
+```
+
+| 组件 | 优先级 |
+|---|---|
+| x64 runtime | 显式 `--runtime` → CLI 同目录 `avelin-app.exe` |
+| x64 Rust worker | 显式 `--rust-worker` → CLI 同目录 `avelin-engine.exe` |
+
+这两个默认位置只依赖 CLI 所在目录，不读取当前工作目录的同名程序。缺少文件或显式路径无效会报错，不会回退到 NSIS。`--engine rust` 拒绝同时传入 `--bridge` 或 `--nsis`；`--rust-worker` 也不能用于 NSIS 构包。Rust 构包不读取 `NSIS_MAKENSIS`，不调用 makensis 或 bridge。
+
+Rust 构建输出 JSON 含 `engine: "rust"`、`setup`、`backend`、`manifest`、`stage`、`signed`、`files`、`runtime_path`、`rust_worker_path` 和 `tool_version`。路径记录实际选用的组件；没有 NSIS 编译耗时字段。
+
+原生载荷使用有版本号、长度和摘要约束的未压缩格式。两层 EXE overlay 仍使用现有包边界校验；每层被嵌入内容加 manifest 不得超过 1 GiB，manifest 本身不超过 32 MiB。Rust worker、runtime 和元数据也占用空间，不能把包上限当成纯应用载荷额度。
+
+### NSIS 后端（默认）
+
+组件解析顺序保持不变：
 
 | 组件 | 优先级 |
 |---|---|
@@ -48,6 +71,10 @@ avelin-cli build --config .\project\avelin.toml --output .\out\Notes-Setup.exe
 
 显式参数或环境变量指定无效文件时直接失败，不悄悄替换。缺少依赖会给出实际路径及 `--runtime`、`--bridge`、`--nsis`/`NSIS_MAKENSIS` 的操作提示。只复制 `makensis.exe` 不足以组成 NSIS；编译失败保留构建目录及诊断。
 
-构建成功 JSON 保留原有 `setup`、`backend`、`manifest`、`stage`、`signed`、`files` 和 `makensis_wall_ms`，新增实际解析后的绝对路径 `runtime_path`、`bridge_path`、`nsis_path`，以及 `tool_version`。这些字段可用于确认实际使用了工具包内组件。
+NSIS 构建成功 JSON 含 `engine: "nsis"`，保留原有 `setup`、`backend`、`manifest`、`stage`、`signed`、`files` 和 `makensis_wall_ms`，并记录实际解析后的绝对路径 `runtime_path`、`bridge_path`、`nsis_path` 及 `tool_version`。这些字段可用于确认实际使用了工具包内组件。
 
-输出 Setup 及 `.backend.exe`、`.manifest.json` 副产物沿用已有“不得覆盖”保护。以上功能只负责配置和构包，不改变安装、升级、卸载或恢复语义。
+### 输出与运行
+
+两个后端输出 Setup 及 `.backend.exe`、`.manifest.json` 副产物，沿用已有“不得覆盖”保护。Setup 是给应用用户使用的完整入口；副产物用于诊断与核验。构建只生成文件，不执行安装，也不等于安装成功。
+
+运行步骤见[接入指南](getting-started.md#安装升级卸载)，退出码和恢复约定见[兼容约定](compatibility.md)。`replay` 重放已解码事件用于检查状态映射；`diagnose --session <目录>` 只读观察已有任务，不会移除锁、修改标记或执行恢复。

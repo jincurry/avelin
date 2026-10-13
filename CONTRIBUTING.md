@@ -1,6 +1,6 @@
 # Contributing to Avelin
 
-欢迎提交修复、文档改进和可复现的问题。当前目标为 Windows x64，部署后端为 NSIS。先阅读[开发指南](docs/development.md)和[架构](docs/architecture.md)。
+欢迎提交修复、文档改进和可复现的问题。当前目标为 Windows x64，部署可选择默认 NSIS 或 Rust 引擎。先阅读[开发指南](docs/development.md)和[架构](docs/architecture.md)。
 
 ## 本地检查
 

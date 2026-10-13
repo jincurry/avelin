@@ -28,7 +28,7 @@ LICENSE_NAME = re.compile(r"^(?:licen[cs]e|copying|copyright|notice|unlicense|of
 CODE_EXTENSIONS = {".rs", ".c", ".cpp", ".h", ".nsh", ".nsi", ".py", ".js"}
 NATIVE_EXTENSIONS = {".dll", ".lib", ".a", ".so", ".dylib", ".exe"}
 FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2"}
-ROOTS = {"x86_64-pc-windows-msvc": ["avelin-app", "avelin-cli"],
+ROOTS = {"x86_64-pc-windows-msvc": ["avelin-app", "avelin-cli", "avelin-engine"],
          "i686-pc-windows-msvc": ["avelin-nsis-bridge"]}
 
 

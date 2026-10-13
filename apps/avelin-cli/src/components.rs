@@ -9,6 +9,41 @@ pub struct Resolved {
     pub nsis: PathBuf,
 }
 
+pub struct NativeResolved {
+    pub runtime: PathBuf,
+    pub worker: PathBuf,
+}
+
+fn resolve_native_with(
+    bin: &Path,
+    runtime: Option<PathBuf>,
+    worker: Option<PathBuf>,
+) -> Result<NativeResolved> {
+    Ok(NativeResolved {
+        runtime: select(
+            runtime,
+            vec![bin.join("avelin-app.exe")],
+            "Avelin runtime",
+            "keep avelin-app.exe next to avelin-cli.exe, or pass --runtime <avelin-app.exe>; repository users can build it with cargo build -p avelin-app --features gui",
+        )?,
+        worker: select(
+            worker,
+            vec![bin.join("avelin-engine.exe")],
+            "Rust engine worker",
+            "keep avelin-engine.exe next to avelin-cli.exe, or pass --rust-worker <avelin-engine.exe>; repository users can build it with cargo build -p avelin-engine",
+        )?,
+    })
+}
+
+pub fn resolve_native(runtime: Option<PathBuf>, worker: Option<PathBuf>) -> Result<NativeResolved> {
+    let own = std::env::current_exe().context("locate avelin-cli executable")?;
+    resolve_native_with(
+        own.parent().context("CLI executable has no parent")?,
+        runtime,
+        worker,
+    )
+}
+
 struct SearchPaths {
     bin: PathBuf,
     workspace: PathBuf,
@@ -189,6 +224,25 @@ mod tests {
             // The fixture owns exactly this generated tree; it cannot contain installer data.
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn native_components_need_no_nsis_and_reject_missing_explicit_worker() {
+        let fixture = Fixture::new();
+        let runtime = fixture.file("kit/avelin-app.exe");
+        let worker = fixture.file("kit/avelin-engine.exe");
+        let found = resolve_native_with(&fixture.0.join("kit"), None, None).unwrap();
+        assert_eq!(found.runtime, runtime);
+        assert_eq!(found.worker, worker);
+        let error = resolve_native_with(
+            &fixture.0.join("kit"),
+            None,
+            Some(fixture.0.join("missing-worker.exe")),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("--rust-worker") && error.contains("missing-worker.exe"));
     }
 
     #[test]

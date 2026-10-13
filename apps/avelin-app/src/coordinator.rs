@@ -62,6 +62,12 @@ pub struct Args {
     pub cancel_after_ms: Option<u64>,
     #[arg(long)]
     pub fault_after_files: Option<u64>,
+    /// Native-engine acceptance instrumentation; never shown as a product option.
+    #[arg(long, hide = true, value_parser = ["after-staging", "before-registration", "after-registration", "before-commit", "after-commit", "rollback"])]
+    pub engine_fault: Option<String>,
+    /// Bounded pause for real-process interruption acceptance only.
+    #[arg(long, hide = true, value_parser = ["prepared", "after-first-publish", "after-commit"])]
+    pub engine_pause: Option<String>,
     #[arg(long, default_value = "0")]
     pub step_delay_ms: u32,
     /// Bounded observation budget. Expiry reports Unknown and never kills the backend.
@@ -295,6 +301,11 @@ pub fn requests_gui(args: &Args) -> bool {
 
 fn validate_launch(args: &Args) -> Result<()> {
     ensure!(
+        (args.engine_fault.is_none() && args.engine_pause.is_none())
+            || (!args.ui_demo && args.operation != Operation::Uninstall),
+        "native fault checkpoints require an actual install or upgrade task"
+    );
+    ensure!(
         !args.ui_demo || args.backend.is_none(),
         "--ui-demo accepts --manifest for a read-only preview, but cannot execute --backend"
     );
@@ -476,6 +487,16 @@ pub fn entry(mut args: Args) -> Result<i32> {
         anyhow::bail!("rebuild with --features gui to run the GPUI experiment");
     }
     let (backend, manifest) = environment(&args)?;
+    if args.engine_fault.is_some() || args.engine_pause.is_some() {
+        let (payload, embedded_manifest) = avelin_core::embedded(backend.path())?
+            .context("--engine-fault requires a native Rust backend package")?;
+        avelin_core::native_payload::NativePayload::parse(&payload, &embedded_manifest)?;
+        ensure!(
+            hash_bytes(&serde_json::to_vec(&embedded_manifest)?)
+                == hash_bytes(&serde_json::to_vec(&manifest)?),
+            "native backend manifest differs from the requested task"
+        );
+    }
     // A visible package may discover an existing installation, but the user
     // still confirms the Upgrade page. Headless install never silently upgrades.
     if args.operation != Operation::Uninstall {
@@ -907,6 +928,12 @@ fn run(
         args.cancel_after_files.unwrap_or(u64::MAX),
         args.step_delay_ms
     );
+    if let Some(point) = &args.engine_fault {
+        config.push_str(&format!("engine_fault={point}\r\n"));
+    }
+    if let Some(point) = &args.engine_pause {
+        config.push_str(&format!("engine_pause={point}\r\n"));
+    }
     let shortcut_evidence = session.join("shortcuts.ini");
     ensure!(
         !shortcut_evidence.exists(),
@@ -1050,8 +1077,8 @@ fn run(
         "UI closed before backend startup; no backend was started"
     );
     let started = Instant::now();
-    let child = command.spawn().context("start NSIS backend")?;
-    // No fallible work may occur between spawning NSIS and installing its guard.
+    let child = command.spawn().context("start installation backend")?;
+    // No fallible work may occur between spawning the backend and installing its guard.
     let mut backend_guard = BackendGuard {
         child,
         lock: product_lock,
@@ -1094,6 +1121,7 @@ fn run(
         let mut events = Vec::<Value>::new();
         let mut backend_events = BackendEvents::default();
         let mut message = String::new();
+        let mut backend_detail = None::<String>;
         let mut connection =
             match server.accept_from(Duration::from_secs(15), backend_guard.child.id()) {
                 Ok(connection) => Some(connection),
@@ -1150,6 +1178,12 @@ fn run(
                         let accepted = backend_events.observe(&event);
                         events.push(event);
                         match accepted {
+                            Some(BackendEvent::Finished(_)) => {
+                                backend_detail = events
+                                    .last()
+                                    .and_then(|value| value["detail"].as_str())
+                                    .map(|detail| detail.chars().take(2048).collect());
+                            }
                             Some(BackendEvent::CancelReceived) => {
                                 cancellation["acknowledged_elapsed_ms"] = observed;
                             }
@@ -1287,7 +1321,8 @@ fn run(
             backend_guard.last_work_progress,
             child_exit,
             args.fault_after_files,
-        );
+        )
+        .map(|diagnostic| diagnostic.with_backend_detail(backend_detail.as_deref()));
         if message.trim().is_empty() {
             if let Some(diagnostic) = &diagnostic {
                 message = diagnostic.reason.clone();
@@ -1334,7 +1369,7 @@ fn run(
         let upgrade_evidence = previous.as_ref().map(|previous| json!({"previous_version":previous.manifest.app_version,"new_version":manifest.app_version,
             "installation_id":receipt.installation_id,"previous_commit_id":previous.receipt.commit_id,"commit_id":receipt.commit_id,
             "journal":session.join("upgrade-journal.jsonl"),"backup":session.join("backup"),"marker":target.join(crate::upgrade::MARKER)}));
-        let report = json!({"task_id":task,"operation":plan.operation,"result":result,"exit_code":child_exit,"coordinator_exit_code":code,"message":message,"preserved_resources":preserved_resources,"upgrade":upgrade_evidence,
+        let report = json!({"task_id":task,"operation":plan.operation,"result":result,"exit_code":child_exit,"coordinator_exit_code":code,"message":message,"backend_terminal_detail":backend_detail,"preserved_resources":preserved_resources,"upgrade":upgrade_evidence,
         "backend_pid":backend_guard.child.id(),"product_lock_retained":child_exit.is_none(),
         "elapsed_ms":started.elapsed().as_millis(),"observation_timeout_secs":args.observation_timeout_secs,"install_dir":target,"session_dir":session,"report_path":report_path,"diagnostic":diagnostic,"events":events,"cancellation":cancellation,"protocol_fault":backend_events.protocol_fault(),"signed":false});
         let saved_report =
@@ -1394,7 +1429,8 @@ fn verify_result(
         let original_receipt_hash = receipt_input.sha256()?;
         let mut receipt: Receipt = serde_json::from_slice(&receipt_input.read_bytes()?)?;
         ensure!(
-            receipt.task_id == expected.task_id
+            receipt.schema_version == SCHEMA_VERSION
+                && receipt.task_id == expected.task_id
                 && receipt.installation_id == expected.installation_id
                 && receipt.commit_id == expected.commit_id
                 && receipt.manifest_sha256 == expected.manifest_sha256
@@ -1403,8 +1439,7 @@ fn verify_result(
                 && receipt.install_dir == expected.install_dir
                 && receipt.user_sid == expected.user_sid
                 && receipt.files == manifest.files
-                && receipt.shortcuts.is_empty()
-                && receipt.uninstaller_sha256.is_none(),
+                && receipt.previous_commit_id == expected.previous_commit_id,
             "receipt commit mismatch"
         );
         for f in &manifest.files {
@@ -1421,18 +1456,44 @@ fn verify_result(
                 == Some(hash_file(&target.join(".avelin/avelin-app.exe"))?.as_str()),
             "uninstall runtime mismatch"
         );
-        // The NSIS-generated uninstaller is only available after execution.
-        // Bind its bytes before reporting success. This local receipt detects
-        // component changes; it is not publisher or same-user authentication.
-        receipt.uninstaller_sha256 = Some(uninstaller.sha256()?);
-        receipt.shortcuts = resources::verified_shortcuts(shortcuts, shortcut_evidence)?;
-        drop(receipt_input);
-        execution_files::update_existing_file(
-            &target_guard,
-            RECEIPT_NAME,
-            &original_receipt_hash,
-            &serde_json::to_vec_pretty(&receipt)?,
+        let actual_uninstaller_hash = uninstaller.sha256()?;
+        let actual_shortcuts = resources::verified_shortcuts(shortcuts, shortcut_evidence)?;
+        if let Some(expected_hash) = &receipt.uninstaller_sha256 {
+            // Native workers publish a complete receipt as their final resource.
+            ensure!(
+                expected_hash == &actual_uninstaller_hash && receipt.shortcuts == actual_shortcuts,
+                "published receipt does not describe the actual uninstall resources"
+            );
+        } else {
+            // Preserve the original NSIS receipt contract: its generated
+            // uninstaller is independently bound after backend completion.
+            ensure!(
+                receipt.shortcuts.is_empty(),
+                "partial shortcut ownership receipt"
+            );
+            receipt.uninstaller_sha256 = Some(actual_uninstaller_hash);
+            receipt.shortcuts = actual_shortcuts;
+            drop(receipt_input);
+            execution_files::update_existing_file(
+                &target_guard,
+                RECEIPT_NAME,
+                &original_receipt_hash,
+                &serde_json::to_vec_pretty(&receipt)?,
+            )?;
+        }
+        let installed = PinnedFile::open(&target.join(".avelin/manifest.json"))?;
+        let installed_manifest: Manifest = serde_json::from_slice(&installed.read_bytes()?)?;
+        ensure!(
+            hash_bytes(&serde_json::to_vec(&installed_manifest)?) == expected.manifest_sha256,
+            "installed manifest does not describe the committed package"
+        );
+        crate::upgrade::verify_registration(
+            &crate::upgrade::registration(&manifest.app_id)?
+                .context("installed registration missing")?,
+            manifest,
+            target,
         )?;
+        crate::upgrade::ensure_no_pending(target)?;
     } else {
         ensure!(
             !target.join(RECEIPT_NAME).exists()
@@ -1447,6 +1508,11 @@ fn verify_result(
         for shortcut in shortcuts {
             resources::verify_removed_or_preserved(Path::new(&shortcut.path), &shortcut.sha256)?;
         }
+        ensure!(
+            crate::upgrade::registration(&manifest.app_id)?.is_none(),
+            "uninstall registration remains"
+        );
+        crate::upgrade::ensure_no_pending(target)?;
     }
     Ok(())
 }

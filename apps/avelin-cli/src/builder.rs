@@ -145,7 +145,7 @@ fn create_output(path: &Path) -> Result<File> {
         .with_context(|| format!("create new build output {}", path.display()))
 }
 
-fn copy_new_file(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn copy_new_file(source: &Path, destination: &Path) -> Result<()> {
     let mut source = File::open(source)?;
     let mut output = create_output(destination)?;
     std::io::copy(&mut source, &mut output)?;
@@ -153,7 +153,7 @@ fn copy_new_file(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut output = create_output(path)?;
     output.write_all(bytes)?;
     output.sync_all()?;
@@ -255,7 +255,7 @@ pub fn build(
     avelin_core::assemble(&staged_runtime, &backend, &manifest, &output)?;
     println!(
         "{}",
-        serde_json::json!({"setup":output,"backend":backend,"manifest":metadata,"stage":stage,"signed":false,"files":manifest.files.len(),"makensis_wall_ms":makensis_wall_ms,"runtime_path":runtime,"bridge_path":bridge,"nsis_path":nsis,"tool_version":env!("CARGO_PKG_VERSION")})
+        serde_json::json!({"engine":"nsis","setup":output,"backend":backend,"manifest":metadata,"stage":stage,"signed":false,"files":manifest.files.len(),"makensis_wall_ms":makensis_wall_ms,"runtime_path":runtime,"bridge_path":bridge,"nsis_path":nsis,"tool_version":env!("CARGO_PKG_VERSION")})
     );
     Ok(())
 }

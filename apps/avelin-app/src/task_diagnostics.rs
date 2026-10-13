@@ -41,6 +41,19 @@ pub(super) struct TaskDiagnostic {
     fault_configuration_proves_cause: bool,
 }
 
+impl TaskDiagnostic {
+    pub(super) fn with_backend_detail(mut self, detail: Option<&str>) -> Self {
+        if let Some(detail) = detail.filter(|value| !value.trim().is_empty()) {
+            self.backend_details = "terminal_event_metadata";
+            if self.reason_source == "fallback" {
+                self.reason = detail.chars().take(2048).collect();
+                self.reason_source = "backend";
+            }
+        }
+        self
+    }
+}
+
 pub(super) fn diagnostic(
     result: &str,
     message: &str,
@@ -69,7 +82,8 @@ pub(super) fn diagnostic(
         } else {
             "fallback"
         },
-        // The current M0 finish protocol has a result/code but no reason field.
+        // Legacy workers have no reason field; native terminal metadata may
+        // supplement this after envelope and payload validation.
         backend_details: "not_provided_by_current_protocol",
         last_progress: last_progress.map(Into::into),
         last_work_progress: last_work_progress.map(Into::into),
@@ -165,6 +179,35 @@ mod tests {
         assert_eq!(diagnostic.observed_backend_exit_code, Some(2));
         assert!(detail.contains("No report was saved successfully."));
         assert!(!detail.contains("Saved report:"));
+    }
+
+    #[test]
+    fn native_reason_is_bounded_and_does_not_override_independent_verification() {
+        let native = diagnostic("Failed", "", None, None, Some(3), None)
+            .unwrap()
+            .with_backend_detail(Some("owned destination changed before publication"));
+        assert_eq!(native.reason_source, "backend");
+        assert_eq!(
+            native.reason,
+            "owned destination changed before publication"
+        );
+        assert_eq!(native.backend_details, "terminal_event_metadata");
+        let verified = diagnostic(
+            "Unknown",
+            "persistent evidence mismatch",
+            None,
+            None,
+            Some(0),
+            None,
+        )
+        .unwrap()
+        .with_backend_detail(Some("installation finished"));
+        assert_eq!(verified.reason, "persistent evidence mismatch");
+        assert_eq!(verified.reason_source, "coordinator");
+        let long = diagnostic("Unknown", "", None, None, Some(4), None)
+            .unwrap()
+            .with_backend_detail(Some(&"界".repeat(4096)));
+        assert_eq!(long.reason.chars().count(), 2048);
     }
 
     #[test]

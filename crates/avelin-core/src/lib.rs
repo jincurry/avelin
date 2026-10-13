@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail, ensure};
 pub mod model;
+pub mod native_payload;
 pub mod presentation;
 pub mod protocol;
 pub mod session;

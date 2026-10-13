@@ -1,0 +1,18 @@
+[package]
+name = "avelin-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+avelin-core = { path = "../avelin-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }

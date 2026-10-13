@@ -85,7 +85,7 @@ try {
     $lockPath = Join-Path $projectRoot 'Cargo.lock'
     $summary.cargo_lock_sha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $null = Invoke-Check 'fmt' $rustup @('run', $RustToolchain, 'cargo', 'fmt', '--all', '--', '--check')
-    $null = Invoke-Check 'source-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '-p', 'avelin-core', '-p', 'avelin-ui', '-p', 'avelin-app', '-p', 'avelin-cli', '--features', 'avelin-app/gui', '--', '--skip', 'manifest_validates_fifty_thousand_files_and_rejects_the_next')
+    $null = Invoke-Check 'source-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '-p', 'avelin-core', '-p', 'avelin-ui', '-p', 'avelin-app', '-p', 'avelin-cli', '-p', 'avelin-engine', '--features', 'avelin-app/gui', '--', '--skip', 'manifest_validates_fifty_thousand_files_and_rejects_the_next')
     $null = Invoke-Check 'bridge-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '--target', 'i686-pc-windows-msvc', '-p', 'avelin-nsis-bridge')
     if ((Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $summary.cargo_lock_sha256) {
         throw 'Cargo.lock changed during source checks.'

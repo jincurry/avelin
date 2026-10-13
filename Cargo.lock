@@ -612,6 +612,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "avelin-engine"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "avelin-core",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "uuid",
+ "windows 0.61.3",
+]
+
+[[package]]
 name = "avelin-nsis-bridge"
 version = "0.0.1"
 dependencies = [

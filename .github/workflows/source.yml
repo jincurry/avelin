@@ -27,6 +27,8 @@ jobs:
           persist-credentials: false
       - name: Check public source contents
         run: python scripts/check-public-source.py
+      - name: Check public release exporter
+        run: python tests/harness/test-public-release.py
       - name: Prepare stable MSVC toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt

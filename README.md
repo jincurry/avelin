@@ -19,6 +19,12 @@ Avelin 将应用发布目录、TOML 配置和品牌资源构建成单个 Setup.e
 
 CLI、GUI runtime 和 Rust worker 均面向 Windows x64。尚未提供全用户提权、服务/驱动、在线更新或差分包。恢复边界见[兼容约定](docs/compatibility.md)。
 
+## 下载预览工具包
+
+[v0.1.0-preview.1](https://github.com/jincurry/avelin/releases/tag/v0.1.0-preview.1) 提供 Windows x64 ZIP 与 SHA-256。解压后 `bin/` 内 CLI、runtime、worker 可配套构包，无需从源码编译；另附 Nimbus 演示 Setup、文档和第三方材料。该预览版未签名，校验与使用步骤见 Release 说明及包内 README。
+
+可选安装组件仍处于[设计提案](docs/optional-components.md)阶段，当前预览版不包含此能力。
+
 ## 从源码开始
 
 需要 Windows x64、PowerShell 7.2+、Rust MSVC 工具链、MSVC Build Tools 和 Windows SDK。构建工具只需 x64 目标。

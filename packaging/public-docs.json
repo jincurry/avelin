@@ -11,6 +11,7 @@
     "third-party.md",
     "releasing.md",
     "maintenance.md",
+    "optional-components.md",
     "schemas/README.md",
     "schemas/examples/command.json",
     "schemas/examples/events.json",

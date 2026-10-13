@@ -12,6 +12,7 @@
 | [架构](architecture.md) | 代码职责、执行路径与状态模型 |
 | [模型与协议](schemas/README.md) | 本地 JSON Schema 与样例 |
 | [路线图](roadmap.md) | 当前能力和后续方向 |
+| [可选组件提案](optional-components.md) | 尚未实现：选装、升级保持选择、同版本增删与兼容策略 |
 | [第三方材料](third-party.md) | 依赖许可、来源及材料生成 |
 | [维护与发布](releasing.md) | 源码提交检查与二进制交付边界 |
 

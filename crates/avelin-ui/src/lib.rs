@@ -18,6 +18,19 @@ pub use avelin_core::protocol::{
 };
 pub use view::{run, run_connected, run_smoke};
 
+/// A host-validated component. Text pairs are Chinese and English respectively.
+/// `installed` is the receipt baseline, not a prediction about a running task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UiComponent {
+    pub id: String,
+    pub name: (String, String),
+    pub description: (String, String),
+    pub size: u64,
+    pub required: bool,
+    pub selected: bool,
+    pub installed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct UiOptions {
     pub app_name: String,
@@ -31,6 +44,14 @@ pub struct UiOptions {
     pub maintenance_details: Vec<(String, String)>,
     /// Explicit original-package restoration mode; changed resources are backed up first.
     pub repair_overwrite: bool,
+    /// Empty for packages without component metadata. Required-only lists are hidden.
+    pub components: Vec<UiComponent>,
+    /// Package/runtime bytes retained for maintenance, separate from selected app files.
+    pub maintenance_bytes: u64,
+    /// Host verified that this same-version original package can change components.
+    pub allow_modify: bool,
+    pub migration_details: Vec<(String, String)>,
+    pub migration_confirmation_required: bool,
     pub desktop_shortcut: bool,
     pub start_menu_shortcut: bool,
     /// Validated, package-contained branding and text. The UI never reads config paths or URLs.
@@ -54,6 +75,11 @@ impl Default for UiOptions {
             previous_version: None,
             maintenance_details: Vec::new(),
             repair_overwrite: false,
+            components: Vec::new(),
+            maintenance_bytes: 0,
+            allow_modify: false,
+            migration_details: Vec::new(),
+            migration_confirmation_required: false,
             desktop_shortcut: true,
             start_menu_shortcut: true,
             presentation: Presentation::default(),

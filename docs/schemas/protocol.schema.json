@@ -81,6 +81,31 @@
             "start_menu_shortcut": {
               "type": "boolean",
               "description": "The user's Start menu shortcut choice for this installation."
+            },
+            "selected_components": {
+              "anyOf": [
+                {
+                  "$ref": "model.schema.json#/$defs/ComponentSelection"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "operation": {
+              "enum": [
+                "install",
+                "uninstall",
+                "upgrade",
+                "repair",
+                "recover",
+                "modify",
+                null
+              ]
+            },
+            "migration_confirmed": {
+              "type": "boolean",
+              "default": false
             }
           }
         },

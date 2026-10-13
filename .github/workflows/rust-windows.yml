@@ -73,7 +73,7 @@ jobs:
           "AVELIN_RUST_CI_EXIT=$validationExitCode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AVELIN_RUST_CI_REPORT=$runDirectory/summary.json" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($validationExitCode -eq 0) {
-            Write-Output 'Rust build, packaging, 17 lifecycle, 6 interruption and 17 maintenance cases passed.'
+            Write-Output 'Rust build, packaging, lifecycle, interruption, maintenance and optional component cases passed.'
           } else {
             Write-Output "Rust preview validation failed (exit code $validationExitCode). See the public summary for the failing command."
           }
@@ -88,7 +88,7 @@ jobs:
             -OutputPath target/rust-ci-public/summary.json -Commit '${{ github.sha }}' `
             -ValidationExitCode $exitCode | ConvertFrom-Json
           $public | ConvertTo-Json -Depth 12 | Write-Output
-          "## Rust validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count); maintenance cases: $($public.maintenance_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "## Rust validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count); maintenance cases: $($public.maintenance_case_count); optional component cases: $($public.optional_component_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Preserve public validation summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

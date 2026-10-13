@@ -29,6 +29,7 @@ use std::{
 pub enum Operation {
     Install,
     Upgrade,
+    Modify,
     Uninstall,
     Repair,
     Recover,
@@ -38,6 +39,7 @@ impl From<Operation> for avelin_core::Operation {
         match operation {
             Operation::Install => Self::Install,
             Operation::Upgrade => Self::Upgrade,
+            Operation::Modify => Self::Modify,
             Operation::Uninstall => Self::Uninstall,
             Operation::Repair => Self::Repair,
             Operation::Recover => Self::Recover,
@@ -60,6 +62,11 @@ pub struct Args {
     pub report: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "install")]
     pub operation: Operation,
+    /// Complete final component IDs, for example core,tools. Defaults apply only to first install.
+    #[arg(long)]
+    pub components: Option<String>,
+    #[arg(skip)]
+    component_context: Option<crate::component_selection::ComponentContext>,
     /// Original interrupted task session; checked against this package and current user.
     #[arg(long)]
     pub recovery_session: Option<PathBuf>,
@@ -346,11 +353,29 @@ pub fn requests_gui(args: &Args) -> bool {
             || (cfg!(feature = "gui")
                 && (matches!(
                     args.operation,
-                    Operation::Uninstall | Operation::Repair | Operation::Recover
+                    Operation::Uninstall
+                        | Operation::Repair
+                        | Operation::Recover
+                        | Operation::Modify
                 ) || args.install_dir.is_none())))
 }
 
 fn validate_launch(args: &Args) -> Result<()> {
+    ensure!(
+        args.components.is_none()
+            || matches!(
+                args.operation,
+                Operation::Install | Operation::Upgrade | Operation::Modify
+            ),
+        "--components is only valid for install, upgrade and modify"
+    );
+    if let Some(value) = &args.components {
+        crate::component_selection::parse_explicit(value)?;
+    }
+    ensure!(
+        args.operation != Operation::Modify || requests_gui(args) || args.components.is_some(),
+        "silent modify requires an explicit --components final selection"
+    );
     ensure!(
         args.operation == Operation::Recover
             || (args.recovery_session.is_none() && !args.recovery_apply),
@@ -360,7 +385,10 @@ fn validate_launch(args: &Args) -> Result<()> {
         args.operation == Operation::Repair || !args.repair_overwrite,
         "--repair-overwrite requires --operation repair"
     );
-    if matches!(args.operation, Operation::Repair | Operation::Recover) {
+    if matches!(
+        args.operation,
+        Operation::Repair | Operation::Recover | Operation::Modify
+    ) {
         ensure!(
             !args.ui_demo
                 && args.cancel_after_files.is_none()
@@ -662,7 +690,10 @@ pub fn entry(mut args: Args) -> Result<i32> {
                 args.operation = Operation::Upgrade;
             }
         }
-        if matches!(args.operation, Operation::Repair | Operation::Recover) {
+        if matches!(
+            args.operation,
+            Operation::Repair | Operation::Recover | Operation::Modify
+        ) {
             if let Some(registration) = &registered {
                 ensure!(
                     resources::same_path(
@@ -678,7 +709,7 @@ pub fn entry(mut args: Args) -> Result<i32> {
                 );
             }
             args.install_dir = Some(discovered_target.clone());
-            if args.operation == Operation::Repair {
+            if matches!(args.operation, Operation::Repair | Operation::Modify) {
                 let repair = crate::maintenance::repair_inputs(
                     &manifest,
                     &discovered_target,
@@ -744,6 +775,18 @@ pub fn entry(mut args: Args) -> Result<i32> {
             validate_launch(&args)?;
         }
     }
+    let selection_target = args.install_dir.clone().unwrap_or_else(|| {
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+            .join(&manifest.directory_name)
+    });
+    args.component_context = Some(crate::component_selection::resolve(
+        &manifest,
+        &selection_target,
+        &transport::current_user_sid()?,
+        args.operation,
+        args.components.as_deref(),
+        requests_gui(&args),
+    )?);
     if requests_gui(&args) {
         #[cfg(feature = "gui")]
         {
@@ -914,6 +957,25 @@ fn run(
         manifest.app_id
     );
     let manifest_hash = hash_bytes(&serde_json::to_vec(&manifest)?);
+    let selection = crate::component_selection::resolve(
+        &manifest,
+        &target,
+        &user_sid,
+        args.operation,
+        args.components.as_deref(),
+        false,
+    )?;
+    if let Some(expected) = args
+        .component_context
+        .as_ref()
+        .and_then(|context| context.receipt_sha256.as_ref())
+    {
+        ensure!(
+            selection.receipt_sha256.as_ref() == Some(expected),
+            "installation changed since the component choices were displayed; reopen the installer"
+        );
+    }
+    let selected_resources = avelin_core::resolve_selection(&manifest, &selection.selected)?;
     let recovery_preflight = if args.operation == Operation::Recover {
         Some(avelin_engine::inspect_recovery(
             &manifest,
@@ -937,14 +999,38 @@ fn run(
     } else {
         None
     };
-    let previous = if args.operation == Operation::Upgrade {
+    let previous = if matches!(args.operation, Operation::Upgrade | Operation::Modify) {
+        let (desktop, start_menu) = if args.operation == Operation::Modify {
+            let receipt = resources::read_receipt(&manifest, &target, &user_sid)?;
+            ensure!(
+                receipt.uninstaller_sha256.as_deref() == Some(backend.sha256()?.as_str()),
+                "modify requires the exact original Rust backend package"
+            );
+            (
+                receipt
+                    .shortcuts
+                    .iter()
+                    .any(|s| s.kind == ShortcutKind::Desktop),
+                receipt
+                    .shortcuts
+                    .iter()
+                    .any(|s| s.kind == ShortcutKind::StartMenu),
+            )
+        } else {
+            (
+                args.desktop_shortcut.unwrap_or(manifest.desktop_shortcut),
+                args.start_menu_shortcut
+                    .unwrap_or(manifest.start_menu_shortcut),
+            )
+        };
         Some(crate::upgrade::prepare(
             &manifest,
             &target,
             &user_sid,
-            args.desktop_shortcut.unwrap_or(manifest.desktop_shortcut),
-            args.start_menu_shortcut
-                .unwrap_or(manifest.start_menu_shortcut),
+            desktop,
+            start_menu,
+            &selection.selected,
+            args.operation == Operation::Modify,
         )?)
     } else {
         None
@@ -952,14 +1038,14 @@ fn run(
     let mut internal_hashes = Vec::new();
     let existing_receipt = match args.operation {
         Operation::Install => {
-            resources::validate_install_destination(&target, &manifest)?;
+            resources::validate_selected_destination(&target, &selected_resources.files)?;
             ensure!(
                 !registry_key_exists(&registry_key)?,
                 "this app already has an uninstall registration; use the explicit upgrade operation with a newer package"
             );
             None
         }
-        Operation::Upgrade => None,
+        Operation::Upgrade | Operation::Modify => None,
         Operation::Recover => None,
         Operation::Repair => Some(
             repair_inputs
@@ -1015,6 +1101,17 @@ fn run(
                 .iter()
                 .any(|s| s.kind == ShortcutKind::StartMenu),
         )
+    } else if let Some(previous) = &previous {
+        (
+            previous
+                .shortcuts
+                .iter()
+                .any(|s| s.kind == ShortcutKind::Desktop),
+            previous
+                .shortcuts
+                .iter()
+                .any(|s| s.kind == ShortcutKind::StartMenu),
+        )
     } else {
         (
             args.desktop_shortcut.unwrap_or(manifest.desktop_shortcut),
@@ -1029,7 +1126,7 @@ fn run(
     } else {
         resources::planned_shortcuts(&manifest, &target, desktop, start_menu)?
     };
-    for resource in &manifest.files {
+    for resource in &selected_resources.files {
         let path = target.join(&resource.path);
         reject_reparse(&path)?;
         ensure!(
@@ -1049,6 +1146,26 @@ fn run(
     let task = locations.task_id;
     let session = locations.session_dir;
     let report_path = locations.report_path;
+    if args.operation == Operation::Modify && selection.selected == selection.installed {
+        let message = if args.english {
+            "No component changes were requested."
+        } else {
+            "组件选择未变化，无需更改。"
+        };
+        let report = json!({"task_id":task,"operation":"modify","result":"Succeeded","coordinator_exit_code":0,
+            "maintenance_status":"NoChanges","changed":false,"message":message,"install_dir":target,
+            "session_dir":session,"selected_components":selection.selected,"selection_source":selection.source,
+            "payload_file_count":selected_resources.payload_file_count,"payload_bytes":selected_resources.payload_bytes,"report_path":report_path});
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        reject_reparse(&report_path)?;
+        fs::write(&report_path, serde_json::to_vec_pretty(&report)?)?;
+        record_saved_report(&hooks, &report_path);
+        println!("{}", serde_json::to_string(&report)?);
+        notify_finished(&hooks, TaskResult::Succeeded, message);
+        return Ok(0);
+    }
     ensure!(
         !session.to_string_lossy().contains(['\r', '\n', '\0']),
         "invalid task evidence path"
@@ -1067,12 +1184,34 @@ fn run(
     } else {
         None
     };
+    let modify_snapshot = if args.operation == Operation::Modify {
+        let snapshot = avelin_engine::capture_modify_snapshot(
+            &manifest,
+            &previous
+                .as_ref()
+                .context("modify installation missing")?
+                .receipt,
+            &target,
+        )?;
+        Some(serde_json::to_vec_pretty(&snapshot)?)
+    } else {
+        None
+    };
+    let _modify_snapshot_guard = modify_snapshot
+        .as_ref()
+        .map(|bytes| {
+            execution_files::create_file(&execution_directory, "modify-snapshot.json", bytes)
+        })
+        .transpose()?;
     let mut plan = if let Some(previous) = &previous {
-        let payload_bytes = manifest.files.iter().try_fold(0u64, |sum, item| {
-            sum.checked_add(item.size)
-                .context("upgrade payload size overflow")
-        })?;
-        let old_bytes = previous.manifest.files.iter().try_fold(0u64, |sum, item| {
+        let payload_bytes = selected_resources
+            .files
+            .iter()
+            .try_fold(0u64, |sum, item| {
+                sum.checked_add(item.size)
+                    .context("upgrade payload size overflow")
+            })?;
+        let old_bytes = previous.receipt.files.iter().try_fold(0u64, |sum, item| {
             sum.checked_add(item.size)
                 .context("old payload size overflow")
         })?;
@@ -1100,40 +1239,67 @@ fn run(
             previous_task_id: previous.receipt.task_id.clone(),
             previous_commit_id: previous.receipt.commit_id.clone(),
             installation_id: previous.receipt.installation_id.clone(),
-            diff: avelin_core::model::UpgradeDiff::between(&previous.manifest, &manifest)?,
+            diff: avelin_core::model::UpgradeDiff::between_files(
+                &previous.receipt.files,
+                &selected_resources.files,
+            )?,
+            selected_components: selection.selected.clone(),
+            previous_selected_components: previous.receipt.selection(&previous.manifest)?,
+            modify_snapshot_sha256: modify_snapshot.as_ref().map(|bytes| hash_bytes(bytes)),
+            backend_sha256: (args.operation == Operation::Modify)
+                .then(|| backend.sha256())
+                .transpose()?,
             staging_dir: session.join("staging"),
             backup_dir: session.join("backup"),
             required_space_bytes: target_bytes
                 .checked_add(temporary_bytes)
                 .context("upgrade required size overflow")?,
         };
-        InstallPlan::new_upgrade(
-            &manifest,
-            &previous.manifest,
-            &previous.receipt,
-            &previous.receipt_sha256,
-            task.clone(),
-            upgrade,
-        )?
+        if args.operation == Operation::Modify {
+            InstallPlan::new_modify(
+                &manifest,
+                &previous.receipt,
+                &previous.receipt_sha256,
+                task.clone(),
+                upgrade,
+            )?
+        } else {
+            InstallPlan::new_upgrade_selected(
+                &manifest,
+                &previous.manifest,
+                &previous.receipt,
+                &previous.receipt_sha256,
+                task.clone(),
+                upgrade,
+                selection.selected.clone(),
+                selection.source,
+            )?
+        }
     } else {
-        InstallPlan::new(
+        InstallPlan::new_selected(
             &manifest,
             args.operation.into(),
             task.clone(),
             target,
             user_sid,
+            selection.selected.clone(),
+            selection.source,
         )?
     };
     plan.desktop_shortcut = desktop;
     plan.start_menu_shortcut = start_menu;
     plan.validate(&manifest)?;
     if let Some(previous) = &previous {
-        plan.validate_upgrade(
-            &manifest,
-            &previous.manifest,
-            &previous.receipt,
-            &previous.receipt_sha256,
-        )?;
+        if args.operation == Operation::Modify {
+            plan.validate_modify(&manifest, &previous.receipt, &previous.receipt_sha256)?;
+        } else {
+            plan.validate_upgrade(
+                &manifest,
+                &previous.manifest,
+                &previous.receipt,
+                &previous.receipt_sha256,
+            )?;
+        }
     }
     ensure!(
         plan.manifest_sha256 == manifest_hash,
@@ -1152,7 +1318,11 @@ fn run(
     let pipe = format!(r"\\.\pipe\avelin-m0-{}", uuid::Uuid::new_v4().simple());
     let candidate = session.join("receipt-candidate.json");
     let mut receipt = existing_receipt.unwrap_or_else(|| Receipt {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if manifest.schema_version == 1 {
+            SCHEMA_VERSION
+        } else {
+            avelin_core::RECEIPT_SCHEMA_VERSION
+        },
         app_id: plan.app_id.clone(),
         app_version: plan.app_version.clone(),
         installation_id: previous
@@ -1164,7 +1334,12 @@ fn run(
         install_dir: target.to_string_lossy().into_owned(),
         manifest_sha256: plan.manifest_sha256.clone(),
         user_sid: plan.user_sid.clone(),
-        files: manifest.files.clone(),
+        files: selected_resources.files.clone(),
+        selected_components: if manifest.schema_version == 1 {
+            vec![]
+        } else {
+            selection.selected.clone()
+        },
         uninstaller_sha256: None,
         shortcuts: if previous.is_some() {
             shortcuts.clone()
@@ -1495,6 +1670,7 @@ fn run(
         };
         let mut repair_evidence = None;
         let mut recovery_evidence = None;
+        let mut modify_evidence = None;
         if result == TaskResult::Succeeded {
             let verified = if args.operation == Operation::Recover {
                 (|| -> Result<()> {
@@ -1532,6 +1708,30 @@ fn run(
                         "恢复检查通过，安装资源未改变；执行恢复需使用 --recovery-apply。".into()
                     };
                     recovery_evidence = Some(serde_json::to_value(report)?);
+                    Ok(())
+                })()
+            } else if args.operation == Operation::Modify {
+                (|| -> Result<()> {
+                    let report = avelin_engine::verify_modify_result(
+                        &manifest,
+                        &target,
+                        &plan.user_sid,
+                        &session,
+                    )?;
+                    let committed = resources::read_receipt(&manifest, &target, &plan.user_sid)?;
+                    ensure!(
+                        committed.task_id == receipt.task_id
+                            && committed.commit_id == receipt.commit_id
+                            && committed.selected_components == receipt.selected_components
+                            && committed.previous_commit_id == receipt.previous_commit_id,
+                        "modified receipt differs from the frozen component selection or commit"
+                    );
+                    modify_evidence = Some(serde_json::to_value(report)?);
+                    message = if args.english {
+                        "Components changed. Existing changed or missing files were left as they were; see the report for details.".into()
+                    } else {
+                        "组件已更改，原有修改和缺失文件保持原状；详情见报告。".into()
+                    };
                     Ok(())
                 })()
             } else if args.operation == Operation::Repair {
@@ -1608,7 +1808,10 @@ fn run(
             }
         }
         if result == TaskResult::Cancelled {
-            if manifest.files.iter().any(|f| target.join(&f.path).exists())
+            if selected_resources
+                .files
+                .iter()
+                .any(|f| target.join(&f.path).exists())
                 || target.join(RECEIPT_NAME).exists()
             {
                 result = TaskResult::Failed;
@@ -1620,7 +1823,13 @@ fn run(
         {
             match crate::upgrade::verify_rollback(previous, &target) {
                 Ok(()) => {
-                    message = if args.english {
+                    message = if args.operation == Operation::Modify {
+                        if args.english {
+                            "Component change failed; the original selection and resource state were independently verified unchanged or restored.".into()
+                        } else {
+                            "组件更改失败；已独立确认原组件选择和文件状态保持原状或已恢复。".into()
+                        }
+                    } else if args.english {
                         "Upgrade failed; the previous installation and preserved user resources were independently verified unchanged or restored. See the upgrade journal for details.".into()
                     } else {
                         "升级失败；已独立确认旧安装与保留的用户资源保持原状或已恢复。详情见升级日志。".into()
@@ -1629,7 +1838,7 @@ fn run(
                 Err(error) => {
                     result = TaskResult::Unknown;
                     message = format!(
-                        "upgrade recovery is not confirmed; preserve the session and backups: {error:#}"
+                        "maintenance rollback is not confirmed; preserve the session and backups: {error:#}"
                     );
                 }
             }
@@ -1651,7 +1860,7 @@ fn run(
         }
         let preserved_resources: Vec<Value> =
             if args.operation == Operation::Uninstall && result == TaskResult::Succeeded {
-                manifest
+                receipt
                     .files
                     .iter()
                     .map(|file| target.join(&file.path))
@@ -1692,6 +1901,7 @@ fn run(
             "journal":session.join("upgrade-journal.jsonl"),"backup":session.join("backup"),"marker":target.join(crate::upgrade::MARKER)}));
         let maintenance_status = if result == TaskResult::Succeeded {
             match args.operation {
+                Operation::Modify => Some("ComponentsChanged"),
                 Operation::Repair => Some(
                     if repair_evidence
                         .as_ref()
@@ -1712,10 +1922,24 @@ fn run(
         } else {
             None
         };
-        let report = json!({"task_id":task,"operation":plan.operation,"result":result,"exit_code":child_exit,"coordinator_exit_code":code,"message":message,"backend_terminal_detail":backend_detail,"preserved_resources":preserved_resources,"upgrade":upgrade_evidence,
-        "repair":repair_evidence,"recovery":recovery_evidence,"maintenance_status":maintenance_status,
+        let mut report = json!({"task_id":task,"operation":plan.operation,"result":result,"exit_code":child_exit,"coordinator_exit_code":code,"message":message,"backend_terminal_detail":backend_detail,"preserved_resources":preserved_resources,"upgrade":upgrade_evidence,
+        "repair":repair_evidence,"recovery":recovery_evidence,"modify":modify_evidence,"maintenance_status":maintenance_status,
+        "selected_components":plan.selected_components,"selection_source":plan.selection_source,"payload_file_count":plan.payload_file_count,"payload_bytes":plan.payload_bytes,
         "backend_pid":backend_guard.child.id(),"product_lock_retained":child_exit.is_none(),
         "elapsed_ms":started.elapsed().as_millis(),"observation_timeout_secs":args.observation_timeout_secs,"install_dir":target,"session_dir":session,"report_path":report_path,"diagnostic":diagnostic,"events":events,"cancellation":cancellation,"protocol_fault":backend_events.protocol_fault(),"signed":false});
+        if args.operation == Operation::Recover {
+            // This wrapper plan does not describe the interrupted transaction's
+            // selection. Recovery evidence identifies the original frozen plan.
+            let fields = report.as_object_mut().expect("report is an object");
+            for field in [
+                "selected_components",
+                "selection_source",
+                "payload_file_count",
+                "payload_bytes",
+            ] {
+                fields.remove(field);
+            }
+        }
         let saved_report =
             persist_and_publish_report(&mut backend_guard, &report, &mut std::io::stdout().lock())?;
         if matches!(code, 3 | 4) {
@@ -1788,7 +2012,7 @@ fn verify_result(
         let receipt_input = PinnedFile::open(&target.join(RECEIPT_NAME))?;
         let receipt: Receipt = serde_json::from_slice(&receipt_input.read_bytes()?)?;
         ensure!(
-            receipt.schema_version == SCHEMA_VERSION
+            receipt.schema_version == expected.schema_version
                 && receipt.task_id == expected.task_id
                 && receipt.installation_id == expected.installation_id
                 && receipt.commit_id == expected.commit_id
@@ -1797,11 +2021,13 @@ fn verify_result(
                 && receipt.app_version == expected.app_version
                 && receipt.install_dir == expected.install_dir
                 && receipt.user_sid == expected.user_sid
-                && receipt.files == manifest.files
+                && receipt.files == expected.files
+                && receipt.selected_components == expected.selected_components
                 && receipt.previous_commit_id == expected.previous_commit_id,
             "receipt commit mismatch"
         );
-        for f in &manifest.files {
+        receipt.validate_manifest(manifest)?;
+        for f in &receipt.files {
             ensure!(
                 hash_file(&target.join(&f.path))? == f.sha256,
                 "installed hash mismatch: {}",
@@ -1843,7 +2069,7 @@ fn verify_result(
                 && !target.join(".avelin/manifest.json").exists(),
             "uninstall resources remain"
         );
-        for f in &manifest.files {
+        for f in &expected.files {
             resources::verify_removed_or_preserved(&target.join(&f.path), &f.sha256)?;
         }
         for shortcut in shortcuts {
@@ -1875,7 +2101,12 @@ fn verify_upgrade_result(
             && receipt.commit_id != previous.receipt.commit_id,
         "upgrade receipt does not bind the new commit to the previous installation"
     );
-    for item in &manifest.files {
+    ensure!(
+        receipt.files == expected.files
+            && receipt.selected_components == expected.selected_components,
+        "upgrade receipt component selection differs from the plan"
+    );
+    for item in &receipt.files {
         resources::confirm_owned_hash(&target.join(&item.path), &item.sha256)?;
     }
     resources::confirm_owned_hash(
@@ -1908,7 +2139,7 @@ fn verify_upgrade_result(
             &item.sha256,
         )?;
     }
-    crate::upgrade::verify_removed(previous, manifest, target)?;
+    crate::upgrade::verify_removed(previous, &receipt.files, target)?;
     crate::upgrade::verify_registration(
         &crate::upgrade::registration(&manifest.app_id)?
             .context("upgraded registration missing")?,
@@ -1991,7 +2222,64 @@ fn ui_options(args: &Args, m: Option<&Manifest>) -> avelin_ui::UiOptions {
         presentation.resolve_locale(user_locale_tag().as_deref())
     };
     let dark = presentation.theme == avelin_core::presentation::ThemeMode::Dark;
+    let context = args.component_context.as_ref();
+    let components = m
+        .map(|manifest| {
+            manifest
+                .components
+                .iter()
+                .map(|component| {
+                    let text = |values: &std::collections::BTreeMap<String, String>| {
+                        (
+                            values
+                                .get("zh-CN")
+                                .cloned()
+                                .unwrap_or_else(|| component.id.clone()),
+                            values
+                                .get("en-US")
+                                .cloned()
+                                .unwrap_or_else(|| component.id.clone()),
+                        )
+                    };
+                    avelin_ui::UiComponent {
+                        id: component.id.clone(),
+                        name: text(&component.name),
+                        description: text(&component.description),
+                        size: manifest
+                            .files
+                            .iter()
+                            .filter(|file| {
+                                file.component_id.as_deref() == Some(component.id.as_str())
+                            })
+                            .map(|file| file.size)
+                            .sum(),
+                        required: component.required,
+                        selected: context
+                            .map_or(component.required || component.default_selected, |state| {
+                                state.selected.contains(&component.id)
+                            }),
+                        installed: context
+                            .is_some_and(|state| state.installed.contains(&component.id)),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     avelin_ui::UiOptions {
+        components,
+        maintenance_bytes: 0,
+        allow_modify: matches!(args.operation, Operation::Repair | Operation::Modify)
+            && m.is_some_and(|manifest| {
+                manifest
+                    .components
+                    .iter()
+                    .any(|component| !component.required)
+            }),
+        migration_details: context
+            .map(|state| state.migration_details.clone())
+            .unwrap_or_default(),
+        migration_confirmation_required: context
+            .is_some_and(|state| state.requires_migration_confirmation),
         operation: args.operation.into(),
         maintenance_details: args.maintenance_details.clone(),
         repair_overwrite: args.repair_overwrite,
@@ -2165,7 +2453,14 @@ fn launch_installed(manifest: &Manifest, target: &Path, locations: &TaskLocation
 fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Result<i32> {
     use avelin_core::protocol::TaskResponse;
     use avelin_ui::{UiBridge, UiCommand, UiPhase, UiSnapshot};
-    let options = ui_options(&args, Some(&manifest));
+    let mut options = ui_options(&args, Some(&manifest));
+    options.maintenance_bytes = fs::metadata(backend.path())?
+        .len()
+        .checked_add(fs::metadata(std::env::current_exe()?)?.len())
+        .and_then(|bytes| {
+            bytes.checked_add(serde_json::to_vec_pretty(&manifest).ok()?.len() as u64)
+        })
+        .context("maintenance size overflow")?;
     // Diagnostics and the page use the same resolved language, including auto.
     args.english = options.locale == avelin_core::presentation::Locale::English;
     let requested_report = args.report.clone();
@@ -2252,8 +2547,40 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                     install_dir,
                     desktop_shortcut,
                     start_menu_shortcut,
+                    selected_components,
+                    operation,
+                    migration_confirmed,
                 } if !started => {
                     started = true;
+                    let requested_operation = match operation.unwrap_or(args.operation.into()) {
+                        avelin_core::Operation::Install => Operation::Install,
+                        avelin_core::Operation::Upgrade => Operation::Upgrade,
+                        avelin_core::Operation::Modify => Operation::Modify,
+                        avelin_core::Operation::Repair => Operation::Repair,
+                        avelin_core::Operation::Recover => Operation::Recover,
+                        avelin_core::Operation::Uninstall => Operation::Uninstall,
+                    };
+                    let maintenance_switch =
+                        matches!(args.operation, Operation::Repair | Operation::Modify)
+                            && matches!(requested_operation, Operation::Repair | Operation::Modify)
+                            && manifest
+                                .components
+                                .iter()
+                                .any(|component| !component.required);
+                    let missing_confirmation = args
+                        .component_context
+                        .as_ref()
+                        .is_some_and(|state| state.requires_migration_confirmation)
+                        && !migration_confirmed;
+                    if (requested_operation != args.operation && !maintenance_switch)
+                        || missing_confirmation
+                    {
+                        task_code = Some(3);
+                        let _ = sender.send(avelin_core::TaskSnapshot::finished(TaskResult::Failed,
+                            "operation change is not permitted or legacy migration requires explicit confirmation"));
+                        continue;
+                    }
+                    args.operation = requested_operation;
                     if args.operation != Operation::Install
                         && !args
                             .install_dir
@@ -2270,6 +2597,17 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                     started_target = Some(install_dir.clone());
                     let mut args = args.clone();
                     args.install_dir = Some(install_dir);
+                    if args.operation != Operation::Repair {
+                        args.repair_overwrite = false;
+                    }
+                    args.components = if matches!(
+                        args.operation,
+                        Operation::Install | Operation::Upgrade | Operation::Modify
+                    ) {
+                        selected_components.map(|ids| ids.join(","))
+                    } else {
+                        None
+                    };
                     if matches!(args.operation, Operation::Install | Operation::Upgrade) {
                         args.desktop_shortcut = Some(desktop_shortcut);
                         args.start_menu_shortcut = Some(start_menu_shortcut);
@@ -2602,6 +2940,7 @@ mod tests {
         let other =
             execution_files::create_file(&directory, "other.exe", b"inert test bytes").unwrap();
         let mut receipt = Receipt {
+            selected_components: vec![],
             schema_version: SCHEMA_VERSION,
             app_id: "dev.avelin.component-test".into(),
             app_version: "0.1.0".into(),

@@ -1,5 +1,7 @@
 //! Native Windows deployment transactions. No script interpreter performs mutations.
 #[cfg(windows)]
+mod modify;
+#[cfg(windows)]
 mod owned_files;
 #[cfg(windows)]
 mod recovery;
@@ -94,6 +96,65 @@ pub struct RepairReport {
     pub restored: Vec<String>,
     pub preserved: Vec<String>,
     pub backups: Vec<String>,
+}
+
+/// An observed payload state. None means absent, never an empty-file digest.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModifyFileState {
+    pub path: String,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModifySnapshot {
+    pub schema_version: u32,
+    pub files: Vec<ModifyFileState>,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModifyReport {
+    pub schema_version: u32,
+    pub task_id: String,
+    pub selected_components: Vec<String>,
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub preserved: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+pub fn capture_modify_snapshot(
+    manifest: &Manifest,
+    receipt: &Receipt,
+    target: &Path,
+) -> Result<ModifySnapshot> {
+    #[cfg(windows)]
+    {
+        modify::capture(manifest, receipt, target)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (manifest, receipt, target);
+        anyhow::bail!("component changes require Windows")
+    }
+}
+
+pub fn verify_modify_result(
+    manifest: &Manifest,
+    target: &Path,
+    user_sid: &str,
+    session: &Path,
+) -> Result<ModifyReport> {
+    #[cfg(windows)]
+    {
+        modify::verify_result(manifest, target, user_sid, session)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (manifest, target, user_sid, session);
+        anyhow::bail!("component changes require Windows")
+    }
 }
 
 pub fn inspect_recovery(

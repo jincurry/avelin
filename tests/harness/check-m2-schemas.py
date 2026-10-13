@@ -52,12 +52,20 @@ def main():
     # The launch response is deliberately separate from the installation terminal snapshot.
     check("launch-result", {"response": "launch_result", "succeeded": True, "detail": ""},
           "protocol", "TaskResponse")
+    selected = json.loads((root / "examples/components-command.json").read_text(encoding="utf-8"))
+    check("components-frozen-ui-intent", selected, "protocol", "TaskCommand")
+    check("legacy-ui-intent-still-accepted", {key: value for key, value in selected.items()
+          if key not in {"selected_components", "operation", "migration_confirmed"}}, "protocol", "TaskCommand")
     invalid = [
         ("model", "Manifest", dict(manifest, desktop_shortcut="yes")),
         ("model", "ShortcutRecord", dict(record, kind="all_users")),
         ("model", "ShortcutRecord", dict(record, sha256="bad")),
         ("model", "Receipt", dict(receipt, shortcuts=[record] * 3)),
         ("protocol", "TaskCommand", {"command": "launch_installed", "path": "C:\\other.exe"}),
+        ("protocol", "TaskCommand", dict(selected, selected_components=[])),
+        ("protocol", "TaskCommand", dict(selected, selected_components=["extra"])),
+        ("protocol", "TaskCommand", dict(selected, selected_components=["core", "core"])),
+        ("protocol", "TaskCommand", dict(selected, migration_confirmed="yes")),
     ]
     for name, definition, value in invalid:
         if validator(name, definition).is_valid(value):

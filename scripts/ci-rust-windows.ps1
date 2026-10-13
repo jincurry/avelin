@@ -138,7 +138,7 @@ try {
     $pythonVersion = InvokeRecorded 'python-version' $python @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; print(sys.version)')
     $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/windows-shell-link.ps1')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/windows-shell-link.ps1')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })
@@ -300,6 +300,12 @@ try {
         Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Maintenance component does not match the extracted ZIP: $name"
     }
     $summary.maintenance = @{ status = $maintenance.status; case_count = @($maintenance.cases).Count; report = $maintenanceReport; report_sha256 = Hash $maintenanceReport }
+    $componentDirectory = Join-Path $runRoot 'optional-components'
+    $null = InvokeRecorded 'rust-optional-components' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-components.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $componentDirectory)
+    $componentReport = Join-Path $componentDirectory 'summary.json'
+    $componentTests = ReadJson $componentReport
+    Require ($componentTests.status -ceq 'PASSED' -and @($componentTests.cases).Count -eq 29 -and @($componentTests.cases | Where-Object { $_.status -cne 'PASSED' }).Count -eq 0 -and @($componentTests.cases.label | Sort-Object -Unique).Count -eq 29) 'Optional component acceptance did not pass all 29 unique cases.'
+    $summary.optional_components = @{ status = $componentTests.status; case_count = @($componentTests.cases).Count; report = $componentReport; report_sha256 = Hash $componentReport }
     # Make sure validation left the distributable and extracted inputs unchanged.
     $finalVerification = (InvokeRecorded 'verify-kit-after-acceptance' $pwsh @('-NoProfile', '-File', (Join-Path $kitRoot 'Verify-RustDevKit.ps1'), '-KitDirectory', $kitRoot, '-ZipPath', $zipPath)) | ConvertFrom-Json
     Require ($finalVerification.verified -eq $true -and (Hash $zipPath) -ceq $zipHash) 'Package changed during acceptance.'

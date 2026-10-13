@@ -1,0 +1,45 @@
+schema_version = 2
+
+[app]
+id = "dev.avelin.example.components"
+name = "示例应用"
+version = "1.0.0"
+entry = "Application.exe"
+
+[payload]
+directory = "payload"
+
+[install]
+directory_name = "AvelinComponentsExample"
+desktop_shortcut = false
+start_menu_shortcut = false
+
+[ui]
+template = "compact"
+theme = "light"
+locale = "zh-CN"
+fallback_locale = "en-US"
+accent_color = "#245A43"
+
+[[components]]
+id = "core"
+required = true
+name = { "zh-CN" = "主程序", "en-US" = "Application" }
+description = { "zh-CN" = "运行示例应用所需的文件", "en-US" = "Files required to run the example application" }
+paths = ["Application.exe"]
+
+[[components]]
+id = "component-a"
+required = false
+default_selected = true
+name = { "zh-CN" = "可选组件 A", "en-US" = "Optional component A" }
+description = { "zh-CN" = "第一组可选文件，用于验证按选择部署", "en-US" = "The first optional file group, for verifying selected deployment" }
+paths = ["component-a/"]
+
+[[components]]
+id = "component-b"
+required = false
+default_selected = false
+name = { "zh-CN" = "可选组件 B", "en-US" = "Optional component B" }
+description = { "zh-CN" = "第二组可选文件，用于验证安装后增删", "en-US" = "The second optional file group, for verifying changes after installation" }
+paths = ["component-b/"]

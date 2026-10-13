@@ -15,6 +15,12 @@ pub enum TaskCommand {
         desktop_shortcut: bool,
         /// The user's Start menu shortcut choice for this installation.
         start_menu_shortcut: bool,
+        #[serde(default)]
+        selected_components: Option<Vec<String>>,
+        #[serde(default)]
+        operation: Option<crate::Operation>,
+        #[serde(default)]
+        migration_confirmed: bool,
     },
     Cancel,
     /// Explicit post-install action; the coordinator must revalidate the installed entry.
@@ -31,6 +37,12 @@ enum TaskCommandWire {
         install_dir: PathBuf,
         desktop_shortcut: bool,
         start_menu_shortcut: bool,
+        #[serde(default)]
+        selected_components: Option<Vec<String>>,
+        #[serde(default)]
+        operation: Option<crate::Operation>,
+        #[serde(default)]
+        migration_confirmed: bool,
     },
     Cancel {},
     LaunchInstalled {},
@@ -43,10 +55,16 @@ impl<'de> Deserialize<'de> for TaskCommand {
                 install_dir,
                 desktop_shortcut,
                 start_menu_shortcut,
+                selected_components,
+                operation,
+                migration_confirmed,
             } => Self::Start {
                 install_dir,
                 desktop_shortcut,
                 start_menu_shortcut,
+                selected_components,
+                operation,
+                migration_confirmed,
             },
             TaskCommandWire::Cancel {} => Self::Cancel,
             TaskCommandWire::LaunchInstalled {} => Self::LaunchInstalled,
@@ -426,6 +444,9 @@ mod tests {
                 install_dir: PathBuf::from("C:\\App"),
                 desktop_shortcut: true,
                 start_menu_shortcut: false,
+                selected_components: None,
+                operation: None,
+                migration_confirmed: false,
             },
         ] {
             let value = serde_json::to_value(&command).unwrap();

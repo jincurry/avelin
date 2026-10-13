@@ -148,6 +148,7 @@ mod tests {
         fn manifest(&self) -> Manifest {
             Manifest {
                 schema_version: SCHEMA_VERSION,
+                components: vec![],
                 app_id: "dev.avelin.native-build-test".into(),
                 app_name: "Native Build".into(),
                 app_version: "1.0.0".into(),
@@ -158,6 +159,7 @@ mod tests {
                 runtime_sha256: None,
                 presentation: None,
                 files: vec![FileResource {
+                    component_id: None,
                     path: "app.exe".into(),
                     size: 17,
                     sha256: hash_bytes(b"application bytes"),

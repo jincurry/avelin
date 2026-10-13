@@ -126,6 +126,8 @@ struct Prepared {
     next_registration: Option<Registration>,
     shortcut_evidence: Vec<u8>,
     repair_preserved: Vec<String>,
+    absent: Vec<PathBuf>,
+    modify_snapshot: Option<crate::ModifySnapshot>,
 }
 
 fn validate_receipt(
@@ -133,11 +135,10 @@ fn validate_receipt(
     manifest: &Manifest,
     request: &EngineRequest<'_>,
 ) -> Result<()> {
+    receipt.validate_manifest(manifest)?;
     ensure!(
-        receipt.schema_version == avelin_core::SCHEMA_VERSION
-            && receipt.app_id == manifest.app_id
+        receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
-            && receipt.files == manifest.files
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
             && receipt.user_sid == request.plan.user_sid
             && key(Path::new(&receipt.install_dir)) == key(&request.plan.install_dir),
@@ -157,7 +158,7 @@ fn allowed_old(
     root: &Path,
 ) -> Result<BTreeMap<WindowsPath, (PathBuf, String)>> {
     let mut allowed = BTreeMap::new();
-    for item in &manifest.files {
+    for item in &receipt.files {
         let path = root.join(&item.path);
         allowed.insert(key(&path), (path, item.sha256.clone()));
     }
@@ -204,6 +205,15 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
     let plan = request.plan;
     plan.validate(request.manifest)?;
     validate_receipt(request.receipt, request.manifest, request)?;
+    ensure!(
+        request.receipt.selection(request.manifest)?
+            == if plan.selected_components.is_empty() {
+                vec!["core".to_string()]
+            } else {
+                plan.selected_components.clone()
+            },
+        "receipt selection differs from frozen plan"
+    );
     ensure!(
         request.session_dir.is_absolute() && request.session_dir.is_dir(),
         "session directory is unavailable"
@@ -289,16 +299,104 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Check actual volume availability before creating staging/backup files. The
+/// full worker stays in maintenance storage even for a core-only selection.
+fn check_transaction_space(request: &EngineRequest<'_>, backup: &[Resource]) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetVolumePathNameW(path: *const u16, volume: *mut u16, count: u32) -> i32;
+        fn GetDiskFreeSpaceExW(
+            path: *const u16,
+            available: *mut u64,
+            total: *mut u64,
+            free: *mut u64,
+        ) -> i32;
+    }
+    let add = |left: u64, right: u64| {
+        left.checked_add(right)
+            .context("transaction space estimate overflow")
+    };
+    let backup_bytes = backup
+        .iter()
+        .try_fold(0u64, |sum, item| add(sum, item.size))?;
+    let deployment = if request.plan.operation == Operation::Uninstall {
+        0
+    } else {
+        let payload = request.payload.context("space estimate requires payload")?;
+        let base = add(request.plan.payload_bytes, payload.runtime.len() as u64)?;
+        let base = add(base, fs::metadata(request.worker_exe)?.len())?;
+        let base = add(
+            base,
+            serde_json::to_vec_pretty(request.manifest)?.len() as u64,
+        )?;
+        // Bounds the receipt, shell links, evidence and durable journal overhead.
+        let evidence = (request.receipt.files.len() as u64)
+            .checked_mul(4096)
+            .and_then(|v| v.checked_add(1024 * 1024))
+            .context("transaction metadata estimate overflow")?;
+        add(base, evidence)?
+    };
+    let session_bytes = add(deployment, backup_bytes)?;
+    let mut volumes: BTreeMap<WindowsPath, (Vec<u16>, u64)> = BTreeMap::new();
+    for (path, bytes) in [
+        (request.session_dir, session_bytes),
+        (request.plan.install_dir.as_path(), deployment),
+    ] {
+        let existing = path
+            .ancestors()
+            .find(|p| p.is_dir())
+            .context("space-check volume unavailable")?;
+        let wide: Vec<u16> = existing.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut volume = vec![0u16; 32768];
+        ensure!(
+            unsafe { GetVolumePathNameW(wide.as_ptr(), volume.as_mut_ptr(), volume.len() as u32) }
+                != 0,
+            "cannot identify deployment volume"
+        );
+        let length = volume
+            .iter()
+            .position(|v| *v == 0)
+            .context("unterminated volume path")?;
+        let name = PathBuf::from(String::from_utf16(&volume[..length])?);
+        volume.truncate(length + 1);
+        let item = volumes.entry(key(&name)).or_insert((volume, 0));
+        item.1 = add(item.1, bytes)?;
+    }
+    for (_, (path, required)) in volumes {
+        let mut available = 0;
+        ensure!(
+            unsafe {
+                GetDiskFreeSpaceExW(
+                    path.as_ptr(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } != 0,
+            "cannot query deployment free space"
+        );
+        ensure!(
+            available >= required,
+            "insufficient volume space: require {required} bytes, available {available}"
+        );
+    }
+    Ok(())
+}
+
 fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> Result<Prepared> {
     validate_request(request)?;
     let root = &request.plan.install_dir;
     let mut backup_resources = Vec::new();
     let mut preserved = Vec::new();
+    let mut absent = Vec::new();
+    let mut modify_snapshot = None;
+    let mut modify_old_paths = BTreeSet::new();
     let registration = match request.plan.operation {
         Operation::Install => {
             for relative in [RECEIPT_NAME, "uninstall.exe", ".avelin"]
                 .into_iter()
-                .chain(request.manifest.files.iter().map(|v| v.path.as_str()))
+                .chain(request.receipt.files.iter().map(|v| v.path.as_str()))
             {
                 let path = root.join(relative);
                 avelin_core::reject_reparse(&path)?;
@@ -404,7 +502,7 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                 );
             }
             for path in request
-                .manifest
+                .receipt
                 .files
                 .iter()
                 .map(|v| root.join(&v.path))
@@ -418,6 +516,105 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             }
             backup_resources = inventory.backup;
             preserved = inventory.preserved;
+            Some(expected)
+        }
+        Operation::Modify => {
+            let previous_bytes = read(&request.session_dir.join("previous-receipt.json"))?;
+            let manifest_bytes = read(&request.session_dir.join("previous-manifest.json"))?;
+            ensure!(
+                previous_bytes == read(&root.join(RECEIPT_NAME))?,
+                "component change receipt changed after confirmation"
+            );
+            ensure!(
+                manifest_bytes == read(&root.join(".avelin/manifest.json"))?,
+                "component change manifest changed after confirmation"
+            );
+            let receipt: Receipt = serde_json::from_slice(&previous_bytes)?;
+            let old: Manifest = serde_json::from_slice(&manifest_bytes)?;
+            validate_receipt(&receipt, &old, request)?;
+            request.plan.validate_modify(
+                request.manifest,
+                &receipt,
+                &hash_bytes(&previous_bytes),
+            )?;
+            ensure!(
+                request.receipt.installation_id == receipt.installation_id
+                    && request.receipt.previous_commit_id.as_deref()
+                        == Some(receipt.commit_id.as_str())
+                    && request.receipt.task_id != receipt.task_id
+                    && request.receipt.commit_id != receipt.commit_id
+                    && request.receipt.shortcuts == receipt.shortcuts,
+                "component change must retain installation identity and shortcut ownership"
+            );
+            let worker_hash = digest(request.worker_exe)?;
+            ensure!(
+                receipt.uninstaller_sha256.as_deref() == Some(worker_hash.as_str())
+                    && request
+                        .plan
+                        .upgrade
+                        .as_ref()
+                        .and_then(|v| v.backend_sha256.as_deref())
+                        == Some(worker_hash.as_str()),
+                "component changes require the exact original worker package"
+            );
+            let snapshot =
+                crate::modify::load_snapshot(request.plan, &receipt, request.session_dir)?;
+            for state in &snapshot.files {
+                crate::modify::confirm_state(root, state)?;
+            }
+            let (removed, retained, missing) =
+                crate::modify::classify(&snapshot, &receipt, request.receipt, root)?;
+            backup_resources = removed;
+            preserved = retained;
+            absent = missing;
+            modify_old_paths = receipt
+                .files
+                .iter()
+                .map(|f| key(Path::new(&f.path)))
+                .collect();
+            for file in &request.receipt.files {
+                if !modify_old_paths.contains(&key(Path::new(&file.path))) {
+                    let path = root.join(&file.path);
+                    avelin_core::reject_reparse(&path)?;
+                    ensure!(
+                        !path.try_exists()?,
+                        "new component conflicts with an unowned resource: {}",
+                        path.display()
+                    );
+                }
+            }
+            let allowed = allowed_old(&old, &receipt, &previous_bytes, &manifest_bytes, root)?;
+            let payload_paths: BTreeSet<_> = receipt
+                .files
+                .iter()
+                .map(|f| key(&root.join(&f.path)))
+                .collect();
+            for (name, (path, hash)) in allowed {
+                if payload_paths.contains(&name) {
+                    continue;
+                }
+                confirm(&path, &hash)?;
+                let resource = Resource {
+                    size: fs::metadata(&path)?.len(),
+                    path,
+                    sha256: hash,
+                };
+                if resource.path == root.join(RECEIPT_NAME) {
+                    backup_resources.push(resource);
+                } else {
+                    preserved.push(resource);
+                }
+            }
+            let shortcuts: BTreeSet<_> = receipt.shortcuts.iter().map(|s| s.kind).collect();
+            ensure!(
+                shortcuts.contains(&ShortcutKind::Desktop) == request.plan.desktop_shortcut
+                    && shortcuts.contains(&ShortcutKind::StartMenu)
+                        == request.plan.start_menu_shortcut,
+                "component changes must retain installed shortcuts"
+            );
+            let expected = Registration::new(request.manifest, root);
+            system::verify_registration(&request.plan.app_id, Some(&expected))?;
+            modify_snapshot = Some(snapshot);
             Some(expected)
         }
         Operation::Uninstall => {
@@ -506,6 +703,7 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
     };
     let next_registration = (request.plan.operation != Operation::Uninstall)
         .then(|| Registration::new(request.manifest, root));
+    check_transaction_space(request, &backup_resources)?;
     let stage_dir = request.session_dir.join("staging");
     let backup_dir = request.session_dir.join("backup");
     owned::create_directory(text(&stage_dir)?)?;
@@ -518,6 +716,12 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
         );
     }
     let mut stage = Vec::new();
+    let selected_paths: BTreeSet<_> = request
+        .receipt
+        .files
+        .iter()
+        .map(|f| key(Path::new(&f.path)))
+        .collect();
     let mut shortcut_evidence = String::from("[shortcuts]\r\n");
     if request.plan.operation != Operation::Uninstall {
         let payload = request.payload.context("native payload missing")?;
@@ -540,6 +744,12 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             .zip(&request.manifest.files)
             .enumerate()
         {
+            if !selected_paths.contains(&key(Path::new(&file.path)))
+                || (request.plan.operation == Operation::Modify
+                    && modify_old_paths.contains(&key(Path::new(&file.path))))
+            {
+                continue;
+            }
             if observer.checkpoint()? {
                 return Err(Cancelled.into());
             }
@@ -577,8 +787,10 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                 .shortcuts
                 .iter()
                 .find(|v| v.kind == shortcut.kind);
-            let bytes = if request.plan.operation == Operation::Repair
-                && Path::new(&shortcut.path).try_exists()?
+            let bytes = if matches!(
+                request.plan.operation,
+                Operation::Repair | Operation::Modify
+            ) && Path::new(&shortcut.path).try_exists()?
                 && original.is_some_and(|v| {
                     digest(Path::new(&shortcut.path)).is_ok_and(|actual| actual == v.sha256)
                 }) {
@@ -622,6 +834,18 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
         });
         stage.push(receipt);
     }
+    if request.plan.operation == Operation::Modify {
+        let payload_paths: BTreeSet<_> = request
+            .receipt
+            .files
+            .iter()
+            .map(|f| key(&root.join(&f.path)))
+            .collect();
+        stage.retain(|item| {
+            item.resource.path == root.join(RECEIPT_NAME)
+                || payload_paths.contains(&key(&item.resource.path))
+        });
+    }
     let mut repair_preserved = Vec::new();
     if request.plan.operation == Operation::Repair {
         let old_receipt_bytes = read(&root.join(RECEIPT_NAME))?;
@@ -662,6 +886,11 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
         }
         stage = retained;
     }
+    // Repair discovers actual replacement backups during classification above.
+    // Recheck those sizes before any backup copies or managed mutations.
+    if request.plan.operation == Operation::Repair {
+        check_transaction_space(request, &backup_resources)?;
+    }
     let mut backup = Vec::new();
     for (index, item) in backup_resources.into_iter().enumerate() {
         if observer.checkpoint()? {
@@ -689,6 +918,8 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
         next_registration,
         shortcut_evidence: shortcut_evidence.into_bytes(),
         repair_preserved,
+        absent,
+        modify_snapshot,
     })
 }
 
@@ -813,16 +1044,35 @@ impl Transaction<'_> {
         }
         Ok(())
     }
+    fn confirm_untouched(&self) -> Result<()> {
+        for item in &self.prepared.preserved {
+            confirm(&item.path, &item.sha256)?;
+            ensure!(
+                fs::metadata(&item.path)?.len() == item.size,
+                "preserved resource size changed"
+            );
+        }
+        for path in &self.prepared.absent {
+            avelin_core::reject_reparse(path)?;
+            ensure!(
+                !path.try_exists()?,
+                "previously absent resource appeared: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
     fn run(&mut self, observer: &mut impl EngineObserver) -> Result<()> {
         let total = self.request.plan.payload_file_count;
         self.pause("prepared", observer)?;
         observer.progress("preparing", 0, total)?;
         self.checkpoint(observer, 0)?;
         self.fault("after-staging")?;
+        self.confirm_untouched()?;
         self.marker()?;
         let payload_paths: BTreeSet<_> = self
             .request
-            .manifest
+            .receipt
             .files
             .iter()
             .map(|v| key(&self.request.plan.install_dir.join(&v.path)))
@@ -887,7 +1137,7 @@ impl Transaction<'_> {
             if index == 0 {
                 self.pause("after-first-publish", observer)?;
             }
-            if index < self.request.manifest.files.len() {
+            if payload_paths.contains(&key(&destination)) {
                 current += 1;
                 observer.progress("extracting", current, total)?;
                 let delay = Instant::now();
@@ -942,6 +1192,7 @@ impl Transaction<'_> {
                 &self.prepared.shortcut_evidence,
             )?;
         }
+        self.confirm_untouched()?;
         self.fault("before-commit")?;
         observer.progress("finalizing", total, total)?;
         if observer.checkpoint()? {
@@ -1078,6 +1329,7 @@ impl Transaction<'_> {
         for item in &self.prepared.preserved {
             confirm(&item.path, &item.sha256)?;
         }
+        self.confirm_untouched()?;
         system::verify_registration(
             &self.request.plan.app_id,
             self.prepared.registration.as_ref(),
@@ -1150,11 +1402,11 @@ pub(crate) fn verify_repair(
         receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
-            && receipt.files == manifest.files
             && receipt.user_sid == user_sid
             && key(Path::new(&receipt.install_dir)) == key(target),
         "repair verification belongs to another installation or package"
     );
+    receipt.validate_manifest(manifest)?;
     let expected_manifest = serde_json::to_vec_pretty(manifest)?;
     let allowed = allowed_old(manifest, &receipt, &bytes, &expected_manifest, target)?;
     let mut preserved = Vec::new();
@@ -1213,6 +1465,8 @@ pub(super) fn execute(
         &prepared.stage,
         &prepared.backup,
         &prepared.preserved,
+        &prepared.absent,
+        prepared.modify_snapshot.as_ref(),
         prepared.registration.as_ref(),
         prepared.next_registration.as_ref(),
     )?;
@@ -1366,6 +1620,7 @@ mod tests {
             let worker = base.join("worker.exe");
             fs::write(&worker, b"test worker").unwrap();
             let manifest = Manifest {
+                components: vec![],
                 schema_version: 1,
                 app_id: format!("org.avelin.native-test.{id}"),
                 app_name: "Native engine fixture".into(),
@@ -1375,6 +1630,7 @@ mod tests {
                 start_menu_shortcut: false,
                 desktop_shortcut: false,
                 files: vec![FileResource {
+                    component_id: None,
                     path: "entry.txt".into(),
                     size: 7,
                     sha256: hash_bytes(b"payload"),
@@ -1391,6 +1647,7 @@ mod tests {
             )
             .unwrap();
             let receipt = Receipt {
+                selected_components: vec![],
                 schema_version: 1,
                 app_id: manifest.app_id.clone(),
                 app_version: manifest.app_version.clone(),
@@ -1519,14 +1776,21 @@ mod tests {
             fs::write(session.join("previous-receipt.json"), &receipt_bytes).unwrap();
             fs::write(session.join("previous-manifest.json"), &manifest_bytes).unwrap();
             fs::write(session.join("upgrade-resources.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema_version":1,"task_id":"task-upgrade","backup":backup,"preserved":preserved,"registration":Registration::new(&old,&self.root)})).unwrap()).unwrap();
+            let selection = avelin_core::inherited_selection(new, &old, &old_receipt).unwrap();
+            let selected = avelin_core::resolve_selection(new, &selection).unwrap();
             let upgrade = avelin_core::UpgradePlan {
+                selected_components: vec![],
+                previous_selected_components: vec![],
+                modify_snapshot_sha256: None,
+                backend_sha256: None,
                 previous_version: old.app_version.clone(),
                 previous_manifest_sha256: old_receipt.manifest_sha256.clone(),
                 previous_receipt_sha256: hash_bytes(&receipt_bytes),
                 previous_task_id: old_receipt.task_id.clone(),
                 previous_commit_id: old_receipt.commit_id.clone(),
                 installation_id: old_receipt.installation_id.clone(),
-                diff: avelin_core::UpgradeDiff::between(&old, new).unwrap(),
+                diff: avelin_core::UpgradeDiff::between_files(&old_receipt.files, &selected.files)
+                    .unwrap(),
                 staging_dir: session.join("staging"),
                 backup_dir: session.join("backup"),
                 required_space_bytes: 1024 * 1024,
@@ -1546,7 +1810,9 @@ mod tests {
             receipt.commit_id = "commit-upgrade".into();
             receipt.task_id = plan.task_id.clone();
             receipt.manifest_sha256 = plan.manifest_sha256.clone();
-            receipt.files = new.files.clone();
+            receipt.schema_version = new.schema_version;
+            receipt.selected_components = plan.selected_components.clone();
+            receipt.files = selected.files;
             receipt.uninstaller_sha256 = None;
             (plan, receipt)
         }
@@ -1599,6 +1865,519 @@ mod tests {
         NativePayload {
             runtime: b"runtime",
             files: vec![b"payload"],
+        }
+    }
+    fn component_fixture(selection: &[&str]) -> (Fixture, NativePayload<'static>) {
+        let mut fixture = Fixture::new();
+        fixture.manifest.schema_version = 2;
+        fixture.manifest.components = vec![avelin_core::ComponentDefinition::core()];
+        for id in ["alpha", "beta"] {
+            let mut component = avelin_core::ComponentDefinition::core();
+            component.id = id.into();
+            component.required = false;
+            component.default_selected = id == "alpha";
+            fixture.manifest.components.push(component);
+        }
+        fixture.manifest.files[0].component_id = Some("core".into());
+        for (path, bytes, component) in [
+            ("settings.txt", b"settings".as_slice(), "core"),
+            ("alpha.txt", b"alpha".as_slice(), "alpha"),
+            ("beta.txt", b"beta".as_slice(), "beta"),
+        ] {
+            fixture.manifest.files.push(FileResource {
+                path: path.into(),
+                size: bytes.len() as u64,
+                sha256: hash_bytes(bytes),
+                component_id: Some(component.into()),
+            });
+        }
+        let mut selection: Vec<_> = selection.iter().map(|s| s.to_string()).collect();
+        selection.sort();
+        fixture.plan = InstallPlan::new_selected(
+            &fixture.manifest,
+            Operation::Install,
+            "task-install".into(),
+            fixture.root.clone(),
+            fixture.plan.user_sid.clone(),
+            selection.clone(),
+            avelin_core::SelectionSource::Explicit,
+        )
+        .unwrap();
+        fixture.receipt.schema_version = 2;
+        fixture.receipt.selected_components = selection.clone();
+        fixture.receipt.manifest_sha256 = fixture.plan.manifest_sha256.clone();
+        fixture.receipt.files = avelin_core::resolve_selection(&fixture.manifest, &selection)
+            .unwrap()
+            .files;
+        (
+            fixture,
+            NativePayload {
+                runtime: b"runtime",
+                files: vec![b"payload", b"settings", b"alpha", b"beta"],
+            },
+        )
+    }
+    fn component_inputs(
+        fixture: &Fixture,
+        session: &Path,
+        selection: &[&str],
+    ) -> (InstallPlan, Receipt) {
+        let receipt_bytes = read(&fixture.root.join(RECEIPT_NAME)).unwrap();
+        let previous: Receipt = serde_json::from_slice(&receipt_bytes).unwrap();
+        let mut selection: Vec<_> = selection.iter().map(|s| s.to_string()).collect();
+        selection.sort();
+        let resources = avelin_core::resolve_selection(&fixture.manifest, &selection).unwrap();
+        let snapshot =
+            crate::capture_modify_snapshot(&fixture.manifest, &previous, &fixture.root).unwrap();
+        let snapshot_bytes = serde_json::to_vec_pretty(&snapshot).unwrap();
+        fs::write(session.join("modify-snapshot.json"), &snapshot_bytes).unwrap();
+        fs::write(session.join("previous-receipt.json"), &receipt_bytes).unwrap();
+        fs::write(
+            session.join("previous-manifest.json"),
+            read(&fixture.root.join(".avelin/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let context = avelin_core::UpgradePlan {
+            previous_version: previous.app_version.clone(),
+            previous_manifest_sha256: previous.manifest_sha256.clone(),
+            previous_receipt_sha256: hash_bytes(&receipt_bytes),
+            previous_task_id: previous.task_id.clone(),
+            previous_commit_id: previous.commit_id.clone(),
+            installation_id: previous.installation_id.clone(),
+            diff: avelin_core::UpgradeDiff::between_files(&previous.files, &resources.files)
+                .unwrap(),
+            staging_dir: session.join("staging"),
+            backup_dir: session.join("backup"),
+            required_space_bytes: 1024 * 1024,
+            selected_components: selection.clone(),
+            previous_selected_components: previous.selected_components.clone(),
+            modify_snapshot_sha256: Some(hash_bytes(&snapshot_bytes)),
+            backend_sha256: previous.uninstaller_sha256.clone(),
+        };
+        let plan = InstallPlan::new_modify(
+            &fixture.manifest,
+            &previous,
+            &hash_bytes(&receipt_bytes),
+            format!("task-{}", session.file_name().unwrap().to_string_lossy()),
+            context,
+        )
+        .unwrap();
+        let mut candidate = previous.clone();
+        candidate.task_id = plan.task_id.clone();
+        candidate.previous_commit_id = Some(previous.commit_id);
+        candidate.commit_id = format!("commit-{}", plan.task_id);
+        candidate.uninstaller_sha256 = None;
+        candidate.selected_components = selection;
+        candidate.files = resources.files;
+        fs::write(
+            session.join("receipt-candidate.json"),
+            serde_json::to_vec_pretty(&candidate).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            session.join("install-plan.json"),
+            serde_json::to_vec_pretty(&plan).unwrap(),
+        )
+        .unwrap();
+        (plan, candidate)
+    }
+
+    #[test]
+    fn selected_install_checks_whole_payload_but_only_owns_selected_files() {
+        for selection in [
+            vec!["core"],
+            vec!["core", "alpha"],
+            vec!["core", "alpha", "beta"],
+        ] {
+            let (fixture, payload) = component_fixture(&selection);
+            fs::create_dir(&fixture.root).unwrap();
+            if !selection.contains(&"beta") {
+                fs::write(fixture.root.join("beta.txt"), b"unowned").unwrap();
+            }
+            let session = fixture.session("install");
+            assert_eq!(
+                execute(
+                    fixture.request(&session, &payload),
+                    &mut Observer::default()
+                )
+                .unwrap()
+                .exit_code,
+                0
+            );
+            let receipt: Receipt =
+                serde_json::from_slice(&read(&fixture.root.join(RECEIPT_NAME)).unwrap()).unwrap();
+            assert_eq!(receipt.files.len(), selection.len() + 1);
+            assert_eq!(
+                fixture.root.join("alpha.txt").exists(),
+                selection.contains(&"alpha")
+            );
+            if !selection.contains(&"beta") {
+                assert_eq!(read(&fixture.root.join("beta.txt")).unwrap(), b"unowned");
+            }
+            let uninstall = fixture.session("uninstall");
+            let plan = InstallPlan::new_selected(
+                &fixture.manifest,
+                Operation::Uninstall,
+                "task-uninstall".into(),
+                fixture.root.clone(),
+                fixture.plan.user_sid.clone(),
+                receipt.selected_components.clone(),
+                avelin_core::SelectionSource::Receipt,
+            )
+            .unwrap();
+            let mut request = fixture.request(&uninstall, &payload);
+            request.plan = &plan;
+            request.receipt = &receipt;
+            assert_eq!(
+                execute(request, &mut Observer::default())
+                    .unwrap()
+                    .exit_code,
+                0
+            );
+            if !selection.contains(&"beta") {
+                assert_eq!(read(&fixture.root.join("beta.txt")).unwrap(), b"unowned");
+            }
+        }
+        let (fixture, mut payload) = component_fixture(&["core"]);
+        payload.files[3] = b"invalid unselected payload";
+        let session = fixture.session("invalid");
+        assert!(
+            execute(
+                fixture.request(&session, &payload),
+                &mut Observer::default()
+            )
+            .is_err()
+        );
+        assert!(!fixture.root.exists());
+    }
+
+    #[test]
+    fn modify_adds_and_removes_while_preserving_missing_and_edited_unchanged_files() {
+        let (fixture, payload) = component_fixture(&["core", "alpha"]);
+        let install = fixture.session("install");
+        assert_eq!(
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default()
+            )
+            .unwrap()
+            .exit_code,
+            0
+        );
+        fs::remove_file(fixture.root.join("entry.txt")).unwrap();
+        fs::write(fixture.root.join("settings.txt"), b"personal settings").unwrap();
+        fs::write(fixture.root.join("alpha.txt"), b"personal alpha").unwrap();
+        let session = fixture.session("modify");
+        let (plan, candidate) = component_inputs(&fixture, &session, &["core", "beta"]);
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &candidate;
+        let outcome = execute(request, &mut Observer::default()).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
+        let report =
+            crate::verify_modify_result(&fixture.manifest, &fixture.root, &plan.user_sid, &session)
+                .unwrap();
+        assert_eq!(report.added, ["beta.txt"]);
+        assert_eq!(report.missing, ["entry.txt"]);
+        assert_eq!(report.preserved, ["settings.txt", "alpha.txt"]);
+        assert_eq!(
+            read(&fixture.root.join("settings.txt")).unwrap(),
+            b"personal settings"
+        );
+        assert_eq!(
+            read(&fixture.root.join("alpha.txt")).unwrap(),
+            b"personal alpha"
+        );
+        assert_eq!(read(&fixture.root.join("beta.txt")).unwrap(), b"beta");
+        assert!(!fixture.root.join("entry.txt").exists());
+        let installed: Receipt =
+            serde_json::from_slice(&read(&fixture.root.join(RECEIPT_NAME)).unwrap()).unwrap();
+        assert_eq!(installed.files, candidate.files);
+        let repeat = fixture.session("readd");
+        let (plan, candidate) = component_inputs(&fixture, &repeat, &["core", "alpha", "beta"]);
+        let mut request = fixture.request(&repeat, &payload);
+        request.plan = &plan;
+        request.receipt = &candidate;
+        assert!(execute(request, &mut Observer::default()).is_err());
+        assert_eq!(
+            read(&fixture.root.join("alpha.txt")).unwrap(),
+            b"personal alpha"
+        );
+    }
+
+    #[test]
+    fn modify_rejects_changed_frozen_state_before_mutation() {
+        for resource in [
+            "entry.txt",
+            "missing-entry",
+            "worker",
+            "snapshot",
+            "plan",
+            "candidate",
+        ] {
+            let (fixture, payload) = component_fixture(&["core", "alpha"]);
+            let install = fixture.session("install");
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default(),
+            )
+            .unwrap();
+            if resource == "missing-entry" {
+                fs::remove_file(fixture.root.join("entry.txt")).unwrap();
+            }
+            let original_receipt = read(&fixture.root.join(RECEIPT_NAME)).unwrap();
+            let session = fixture.session("modify");
+            let (mut plan, mut candidate) = component_inputs(&fixture, &session, &["core", "beta"]);
+            match resource {
+                "entry.txt" | "missing-entry" => {
+                    fs::write(fixture.root.join("entry.txt"), b"late edit").unwrap()
+                }
+                "worker" => fs::write(&fixture.worker, b"other worker").unwrap(),
+                "snapshot" => fs::write(session.join("modify-snapshot.json"), b"{}").unwrap(),
+                "plan" => plan.payload_file_count += 1,
+                "candidate" => candidate.files[0].component_id = Some("beta".into()),
+                _ => unreachable!(),
+            }
+            let mut request = fixture.request(&session, &payload);
+            request.plan = &plan;
+            request.receipt = &candidate;
+            assert!(
+                execute(request, &mut Observer::default()).is_err(),
+                "{resource}"
+            );
+            assert_eq!(
+                read(&fixture.root.join(RECEIPT_NAME)).unwrap(),
+                original_receipt
+            );
+            assert!(!fixture.root.join("beta.txt").exists());
+            assert!(!fixture.root.join(MARKER).exists());
+        }
+    }
+
+    #[test]
+    fn repair_only_selected_components_and_upgrade_does_not_add_new_defaults() {
+        let (fixture, payload) = component_fixture(&["core"]);
+        let install = fixture.session("install");
+        execute(
+            fixture.request(&install, &payload),
+            &mut Observer::default(),
+        )
+        .unwrap();
+        fs::remove_file(fixture.root.join("entry.txt")).unwrap();
+        fs::write(fixture.root.join("alpha.txt"), b"not installed by avelin").unwrap();
+        let session = fixture.session("repair");
+        let previous_bytes = read(&fixture.root.join(RECEIPT_NAME)).unwrap();
+        let previous: Receipt = serde_json::from_slice(&previous_bytes).unwrap();
+        fs::write(session.join("prior-receipt.json"), previous_bytes).unwrap();
+        let plan = InstallPlan::new_selected(
+            &fixture.manifest,
+            Operation::Repair,
+            "task-repair".into(),
+            fixture.root.clone(),
+            fixture.plan.user_sid.clone(),
+            previous.selected_components.clone(),
+            avelin_core::SelectionSource::Receipt,
+        )
+        .unwrap();
+        let mut candidate = previous.clone();
+        candidate.task_id = plan.task_id.clone();
+        candidate.previous_commit_id = Some(previous.commit_id);
+        candidate.commit_id = "commit-repair".into();
+        candidate.uninstaller_sha256 = None;
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &candidate;
+        assert_eq!(
+            execute(request, &mut Observer::default())
+                .unwrap()
+                .exit_code,
+            0
+        );
+        assert_eq!(read(&fixture.root.join("entry.txt")).unwrap(), b"payload");
+        assert_eq!(
+            read(&fixture.root.join("alpha.txt")).unwrap(),
+            b"not installed by avelin"
+        );
+        assert!(!fixture.root.join("beta.txt").exists());
+        assert!(
+            verify_repair(&fixture.manifest, &fixture.root, &plan.user_sid)
+                .unwrap()
+                .fully_repaired
+        );
+        let mut new = fixture.manifest.clone();
+        new.app_version = "2.0.0".into();
+        for component in &mut new.components {
+            component.default_selected = true;
+        }
+        let session = fixture.session("upgrade");
+        let (plan, candidate) = fixture.upgrade_inputs(&session, &new);
+        assert_eq!(plan.selected_components, ["core"]);
+        let mut request = fixture.request(&session, &payload);
+        request.manifest = &new;
+        request.plan = &plan;
+        request.receipt = &candidate;
+        let outcome = execute(request, &mut Observer::default()).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
+        assert_eq!(
+            read(&fixture.root.join("alpha.txt")).unwrap(),
+            b"not installed by avelin"
+        );
+        assert!(!fixture.root.join("beta.txt").exists());
+        let installed: Receipt =
+            serde_json::from_slice(&read(&fixture.root.join(RECEIPT_NAME)).unwrap()).unwrap();
+        assert_eq!(installed.selected_components, ["core"]);
+        assert_eq!(installed.files.len(), 2);
+    }
+
+    #[test]
+    fn modify_external_change_is_preserved_and_requires_inspection() {
+        let (fixture, payload) = component_fixture(&["core", "alpha"]);
+        let install = fixture.session("install");
+        execute(
+            fixture.request(&install, &payload),
+            &mut Observer::default(),
+        )
+        .unwrap();
+        let session = fixture.session("modify");
+        let (plan, candidate) = component_inputs(&fixture, &session, &["core", "beta"]);
+        fixture.persistent_identity(&session, &plan, false);
+        struct ExternalWriter(PathBuf);
+        impl EngineObserver for ExternalWriter {
+            fn progress(&mut self, phase: &str, current: u64, _: u64) -> Result<()> {
+                if phase == "extracting" && current == 1 {
+                    fs::write(&self.0, b"external application edit")?;
+                }
+                Ok(())
+            }
+            fn checkpoint(&mut self) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &candidate;
+        let outcome = execute(
+            request,
+            &mut ExternalWriter(fixture.root.join("settings.txt")),
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, 4);
+        assert_eq!(
+            read(&fixture.root.join("settings.txt")).unwrap(),
+            b"external application edit"
+        );
+        assert!(fixture.root.join(MARKER).exists());
+        assert!(
+            crate::inspect_recovery(&fixture.manifest, &fixture.root, &session, &plan.user_sid)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn component_modify_recovery_keeps_frozen_selection_and_actual_unchanged_state() {
+        struct InterruptAt {
+            point: &'static str,
+            root: PathBuf,
+        }
+        impl EngineObserver for InterruptAt {
+            fn progress(&mut self, phase: &str, current: u64, _: u64) -> Result<()> {
+                if (self.point == "publish" && phase == "extracting" && current == 1)
+                    || (self.point == "commit" && phase == "finalizing")
+                {
+                    panic!("simulated termination");
+                }
+                Ok(())
+            }
+            fn checkpoint(&mut self) -> Result<bool> {
+                if self.point == "remove"
+                    && self.root.join(MARKER).exists()
+                    && !self.root.join("alpha.txt").exists()
+                {
+                    panic!("simulated termination after removal");
+                }
+                Ok(false)
+            }
+        }
+        for point in ["remove", "publish", "commit", "committed"] {
+            let (fixture, payload) = component_fixture(&["core", "alpha"]);
+            let install = fixture.session("install");
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default(),
+            )
+            .unwrap();
+            fs::remove_file(fixture.root.join("entry.txt")).unwrap();
+            fs::write(fixture.root.join("settings.txt"), b"user configuration").unwrap();
+            let original = read(&fixture.root.join(RECEIPT_NAME)).unwrap();
+            let session = fixture.session("modify");
+            let (plan, candidate) = component_inputs(&fixture, &session, &["core", "beta"]);
+            fixture.persistent_identity(&session, &plan, false);
+            let mut request = fixture.request(&session, &payload);
+            request.plan = &plan;
+            request.receipt = &candidate;
+            if point == "committed" {
+                request.fault_point = Some("after-commit");
+                assert_eq!(
+                    execute(request, &mut Observer::default())
+                        .unwrap()
+                        .exit_code,
+                    4
+                );
+            } else {
+                assert!(
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(
+                        request,
+                        &mut InterruptAt {
+                            point,
+                            root: fixture.root.clone()
+                        }
+                    )))
+                    .is_err()
+                );
+            }
+            let check =
+                crate::inspect_recovery(&fixture.manifest, &fixture.root, &session, &plan.user_sid)
+                    .unwrap();
+            assert_eq!(
+                check.decision,
+                if point == "committed" {
+                    "confirm_committed"
+                } else {
+                    "rollback"
+                }
+            );
+            let recovery = || crate::RecoveryRequest {
+                manifest: &fixture.manifest,
+                target: &fixture.root,
+                session: &session,
+                user_sid: &plan.user_sid,
+                apply: true,
+            };
+            crate::recover(recovery(), &mut Observer::default()).unwrap();
+            assert_eq!(
+                crate::recover(recovery(), &mut Observer::default())
+                    .unwrap()
+                    .decision,
+                "already_recovered"
+            );
+            assert_eq!(
+                read(&fixture.root.join("settings.txt")).unwrap(),
+                b"user configuration"
+            );
+            assert!(!fixture.root.join("entry.txt").exists());
+            if point == "committed" {
+                crate::verify_modify_result(
+                    &fixture.manifest,
+                    &fixture.root,
+                    &plan.user_sid,
+                    &session,
+                )
+                .unwrap();
+            } else {
+                assert_eq!(read(&fixture.root.join(RECEIPT_NAME)).unwrap(), original);
+                assert_eq!(read(&fixture.root.join("alpha.txt")).unwrap(), b"alpha");
+                assert!(!fixture.root.join("beta.txt").exists());
+            }
         }
     }
     #[test]
@@ -2459,6 +3238,7 @@ mod tests {
         }
         let mut fixture = Fixture::new();
         fixture.manifest.files.push(FileResource {
+            component_id: None,
             path: "cleanup_incomplete.txt".into(),
             size: 5,
             sha256: hash_bytes(b"other"),

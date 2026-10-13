@@ -14,6 +14,7 @@ Avelin 将应用发布目录、TOML 配置和品牌资源构建成单个 Setup.e
 - 桌面/开始菜单快捷方式、显式静默入口、成功后手动启动。
 - 安装取消、任务日志、安装记录、结果核验和只读诊断。
 - Rust 中断事务的显式恢复；同版本修复缺失资源，默认保留修改内容。
+- 可选组件清单、按组件部署、升级继承选择、同版本增删组件。
 - 卸载保留未知用户文件和已修改的受管资源。
 - `build` 使用原生 Rust worker 构包和部署，工具链只需 Windows x64 组件。
 
@@ -23,7 +24,7 @@ CLI、GUI runtime 和 Rust worker 均面向 Windows x64。尚未提供全用户�
 
 [v0.1.0-preview.1](https://github.com/jincurry/avelin/releases/tag/v0.1.0-preview.1) 提供 Windows x64 ZIP 与 SHA-256。解压后 `bin/` 内 CLI、runtime、worker 可配套构包，无需从源码编译；另附 Nimbus 演示 Setup、文档和第三方材料。该预览版未签名，校验与使用步骤见 Release 说明及包内 README。
 
-可选安装组件仍处于[设计提案](docs/optional-components.md)阶段，当前预览版不包含此能力。
+当前源码已支持[可选组件](docs/optional-components.md)，提供配置和[通用示例](examples/components/README.md)。上面的已发布 `v0.1.0-preview.1` 二进制不包含此功能，体验组件能力需配套构建当前源码。
 
 ## 从源码开始
 
@@ -82,7 +83,7 @@ avelin-cli check --config ./MyInstaller/avelin.toml
 
 ## 项目状态
 
-当前源码仅保留 Rust 引擎，安装、升级、卸载、恢复和修复共用同一条执行链。验收范围与复现入口见[开发指南](docs/development.md#rust-引擎真实进程验收)。性能、签名和独立环境验证不在本轮范围。请使用新测试产品 ID 和目录验证自己的应用。
+当前源码仅保留 Rust 引擎，安装、升级、组件更改、卸载、恢复和修复共用同一条执行链。验收范围与复现入口见[开发指南](docs/development.md#rust-引擎真实进程验收)。性能、签名和独立环境验证不在本轮范围。请使用新测试产品 ID 和目录验证自己的应用。
 
 个人环境报告、历史内部评审、原型和生成产物不进入源码提交。当前不承诺长期稳定 API 或任意历史包兼容，具体行为以公开契约为准。
 

@@ -12,6 +12,29 @@
 
 JSON Schema 只验证结构和可表达的字段约束。Windows 路径、PNG 完整解码、占位符、跨字段计数、manifest 摘要、真实资源归属和当前用户必须继续由 Rust 实现验证。模型 schema 的 50 000 是保留的解析上限，不是当前产品容量或本轮测试目标。
 
+## 可选组件与 schema 版本
+
+配置、manifest、plan、receipt 分别使用独立的 schema 2 常量；旧 schema 1 仍可读取。全局旧版常量没有直接改号。`examples/manifest.json`、`receipt.json`、`install-plan.json` 保留原样，用于核对旧摘要和省略字段兼容；`examples/components-*.json` 展示当前组件模型和 `modify`。
+
+`components-receipt.json` 使用无末尾换行的紧凑 JSON，`components-modify-plan.json` 的前序 receipt 摘要绑定这份文件的原始字节，避免 Git 换行转换改变示例的绑定。不要只格式化 receipt 而不同时更新摘要。
+
+| 数据 | schema 2 新约束 |
+|---|---|
+| Manifest | 保存完整包的 `components` 与所有文件；每个文件必须有 `component_id`；恰有一个必选 `core`，入口属于它 |
+| InstallPlan | `selected_components` 是排序且含 `core` 的完整最终选集；`selection_source` 记录来源；`payload_file_count` / `payload_bytes` 统计选集，`package_payload_bytes` 统计完整包 |
+| Receipt | `selected_components` 与 `files` 严格对应；文件保留发行原始 hash，即使用户之后修改或删除了文件 |
+| UpgradePlan | 原始 receipt 字节摘要、前后选集、受管文件差异；`modify` 另外绑定 `modify_snapshot_sha256` 和 `backend_sha256` |
+
+`selection_source` 可为 `default`、`inherited`、`explicit`、`legacy_migration` 或 `receipt`。首次安装采用默认或显式选择；升级继承旧选择，不自动加入新组件；修复、卸载使用 receipt；旧版有歧义的迁移需要显式选择。
+
+JSON Schema 分别限制两个版本：schema 1 不接受实际组件目录、文件归属或非空选集，schema 2 必须有组件目录、归属和冻结选集。它还检查组件 ID、双语文本、必选状态、选择不重复且包含 `core`。组件 ID 唯一、文件是否属于声明的组件、选集是否已排序、receipt 是否恰好等于选集、真实路径冲突、统计和摘要绑定继续由 Rust 纯模型及执行层验证，不能仅凭 Schema 通过就执行。
+
+`operation: modify` 仅接受 schema 2，复用 `upgrade` 字段承载原安装上下文；它要求同一完整 manifest、相同版本与 backend、原状态快照及发生变化的选集，不能有文件替换差异。未变化组件保留其实际修改或缺失状态。`upgrade` 仍要求更高版本，不能携带 modify 快照；repair/recover/uninstall 不能借此改变选集。
+
+UI `start` 命令新增可省略的 `selected_components`、`operation` 和 `migration_confirmed`；旧命令仍可读取。这里只是用户意图，coordinator 必须验证允许的操作、旧版迁移确认、安装身份与选集，然后冻结为 plan。原生完整载荷的二进制版本仍为 1，按完整 manifest 顺序校验，不能用选集重新解释载荷偏移。
+
+## 原有模型与验收
+
 `BackendEvent` 是原有后端负载，`TaskSnapshot` 是供 UI 使用的共享快照，两者并非相同格式。传输层还校验 `protocol_version`、任务、顺序和对端身份。`replay-*.json` 用于 `avelin-cli replay` 的语义回放，不提供传输认证或安装成功的磁盘证据。
 
 M2 区分 manifest 的快捷方式默认值与 plan 的实际选择；receipt 的 `shortcuts` 记录当前用户受控路径、类型、入口和摘要。结构有效仍不代表该资源属于当前任务，运行时必须复核路径、SID、目标和实际文件。`LaunchInstalled` 不接受外部路径；独立 `TaskResponse` 的 `launch_result` 不改变 `TaskSnapshot` 的安装终态。中英展示目录覆盖安装、卸载、升级与启动反馈。

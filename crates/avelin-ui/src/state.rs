@@ -72,6 +72,15 @@ impl UiState {
         accepted && !self.disconnected && !self.start_requested && self.phase() == UiPhase::Ready
     }
 
+    /// A maintenance tab change remains local until Start freezes the intent.
+    pub(crate) fn set_operation(&mut self, operation: Operation) -> bool {
+        if self.disconnected || self.start_requested || self.phase() != UiPhase::Ready {
+            return false;
+        }
+        self.operation = operation;
+        true
+    }
+
     /// Returns true once, when the view should dispatch a start command.
     pub(crate) fn request_start(&mut self, accepted: bool) -> bool {
         if !self.can_start(accepted) {

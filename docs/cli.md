@@ -1,6 +1,6 @@
 # CLI 参数契约
 
-CLI 工具预览版本为 `0.1.0-preview.1`。这是构建工具的版本，不是安装包应用版本、runtime ABI 或 manifest/schema 版本；其他 crate 版本保持原值，公开 manifest、plan 与 receipt schema 仍为 `1`。Rust 中断恢复凭据单独使用 schema `2`，不能用工具版本号推断旧记录可恢复。
+CLI 工具预览版本为 `0.1.0-preview.1`。当前源码新增可选组件，配置、Manifest、Plan 与 Receipt 使用 schema `2`，仍读取支持范围内的旧 schema `1`。已发布的同名 `v0.1.0-preview.1` 二进制不含组件能力，不能仅凭版本字符串判断能力；请配套使用当前源码构建的 CLI、runtime 和 worker。Rust 中断恢复凭据有自己的版本，不能据此推断旧记录可恢复。
 
 ## 创建配置
 
@@ -22,7 +22,7 @@ avelin-cli check --config .\project\avelin.toml
 
 如果载荷在配置目录内，TOML 保存相对路径（上例为 `dist`），便于整体移动。外部载荷保存明确的绝对路径；移动配置后需要自行更新该路径。配置本身必须在载荷目录之外，避免把生成的配置意外收进载荷。
 
-初始快捷方式选项为 Desktop `false`、Start Menu `true`。配置不添加自定义 UI 字段，使用现有默认展示；需要品牌配置时可按 [接入指南](getting-started.md) 编辑生成文件。
+初始快捷方式选项为 Desktop `false`、Start Menu `true`。当前 `init` 生成 schema `2`，将已扫描文件明确分配给必选 `core` 组件。添加可选组件时从 `core.paths` 移出相应文件，再定义新组；文件必须且只能归属一个组。配置不添加自定义 UI 字段，使用默认展示；品牌配置见[接入指南](getting-started.md)。
 
 命令先通过与 `check` 相同的 TOML、资源清单和 Manifest 校验，再写配置。用户文本通过 TOML 序列化器转义；非法 ID/版本/入口、空载荷或现有配置均失败。它不复制、不修改、不执行应用文件；Windows 路径中的 reparse point/junction 被拒绝，写入期间固定目录句柄，并以 `CREATE_NEW` 拒绝覆盖。该初始化写入保护当前只支持 Windows。I/O 写入失败时保留已创建的文件或空目录供检查，不自动删除目录，也不在重试时覆盖文件。
 
@@ -65,6 +65,8 @@ avelin-cli build --config .\project\avelin.toml `
 
 ## 检查与恢复中断事务
 
+组件选择与同版本更改见本文下方的对应章节。恢复使用中断前已冻结的选集，不能在恢复命令中改选。
+
 ```powershell
 avelin-cli recover --session '<原任务会话目录>' --setup '<该任务的原始Setup.exe>' --check
 avelin-cli recover --session '<原任务会话目录>' --setup '<该任务的原始Setup.exe>' --apply
@@ -97,3 +99,23 @@ avelin-cli recover --session '<原任务会话目录>' --setup '<该任务的原
 修复保持应用版本及安装位置，不能把修复参数用于降级或绕过升级规则。存在未完成事务时先恢复，再发起新的修复任务。详细资源处理规则见[恢复与修复](maintenance.md)。
 
 修复报告包含 `repair.fully_repaired`、`restored`、`preserved` 和 `backups`。维护状态 `RepairComplete` 与 `RepairPreservedConflicts` 分别表示完整修复和仍保留修改项；任务正常结束不自动表示所有冲突都已修复。保留备份及其记录，确认需要后再由用户管理。
+
+## 组件选择与同版本更改
+
+以下参数属于构建后的 **Setup runtime**，不属于 `avelin-cli build`：
+
+```powershell
+& '<Setup.exe>' --silent --install-dir '<新安装目录>' --components core,component-a --report '<新报告路径>'
+& '<原始Setup.exe>' --silent --operation modify --install-dir '<原安装目录>' --components core,component-b --report '<新报告路径>'
+& '<新版Setup.exe>' --silent --operation upgrade --install-dir '<原安装目录>' --components core,component-a --report '<新报告路径>'
+```
+
+| 参数/场景 | 契约 |
+|---|---|
+| `--components <逗号分隔的ID>` | 完整目标集合，必须含 `core`；拒绝空、重复、未知 ID |
+| 首次安装省略组件参数 | 使用包内默认选择 |
+| 升级省略组件参数 | 继承原选择；新出现的可选组件不自动选中 |
+| `--operation modify` | 使用同版本同构建的原始 Setup 增删组件；静默模式必须提供 `--components` |
+| repair / recover / uninstall | 拒绝 `--components`，按原安装记录或冻结计划执行 |
+
+GUI 使用清单选择，同版本原包维护页提供“修复安装 / 更改组件”。旧 schema 1 文件归属迁移若需要确认，GUI 展示映射并额外确认；静默模式显式传入完整组件集合表达迁移意图，不另设迁移开关。文件保护与原包核验仍然生效。配置、路径规则和空间说明见[可选组件](optional-components.md)。

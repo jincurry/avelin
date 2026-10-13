@@ -31,7 +31,7 @@ creates successful, failed or cancelled installation results.
 `UiCommand`, `UiPhase`, `UiSnapshot` and `UiResponse` re-export the shared task types from
 `avelin-core::protocol`. The view retains only local interaction state; it does
 not parse backend wire messages or define a public plugin API.
-`UiOptions.operation` chooses Install, Uninstall or Upgrade. Install displays the actual
+`UiOptions.operation` chooses Install, Uninstall, Upgrade, Repair, Recover or Modify. Install displays the actual
 desktop/Start menu choices, initialized by `desktop_shortcut` and
 `start_menu_shortcut`; Start submits the user's choices. Uninstall displays a
 branded confirmation with the fixed installed location, hides path editing and
@@ -75,11 +75,35 @@ text uses a contrasting black or white foreground; hover/active colors maintain
 that contrast. Progress adapts very pale/dark colors against its track. The
 accepted default button opacity and dark progress colors are preserved.
 
-Visible labels, menus, notices and accessibility names use the core catalogs.
+Standard labels, menus, notices and accessibility names use the core catalogs.
 Missing overrides use that language's built-in text. Automatic locale detection
 uses `fallback_locale` when the host language cannot be matched. Window title,
 version and progress support the catalog's named placeholders. Backend diagnostic
 details remain verbatim; UI-generated errors retranslate when language changes.
+
+## Component list and maintenance
+
+`UiOptions.components` carries host-validated `UiComponent` entries: stable ID,
+Chinese/English name and description, logical file bytes, required/selected state,
+and the installed receipt baseline. The view uses a compact checkbox list for
+Install, Upgrade and Modify. Required-only packages hide the list; Repair and
+Recover never edit the selection. Component/maintenance labels currently use
+built-in bilingual text; component names/descriptions come from the package.
+
+Stable checkbox IDs retain keyboard focus across selection renders. Required
+items cannot be deselected. Selection changes clear confirmation; Start sends
+the operation and complete selected ID list atomically, after which edits are
+locked. The main area scrolls while the footer remains fixed. Selected bytes
+exclude the separately disclosed `maintenance_bytes`; the host still checks
+actual temporary/backup space.
+
+The host sets `allow_modify` only for a verified same-build maintenance package.
+Repair/Modify switching is local until Start and clears confirmation. Modify
+uses receipt defaults, marks additions/removals, and disables a no-op Start.
+`migration_details` and `migration_confirmation_required` add an independent
+legacy-file-mapping consent; changing selection clears both confirmations.
+Modify does not offer a post-success Launch action, because it does not also
+repair existing missing application files.
 
 `--smoke-seconds 3` uses the demo-only `run_smoke` entry point and closes after
 three seconds. Diagnostic lines identify native window creation, actual adapter,

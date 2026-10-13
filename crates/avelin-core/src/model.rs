@@ -2,8 +2,8 @@
 //! A plan binds intent to a manifest; it does not assert free space, ownership or execution success.
 
 use crate::{
-    FileResource, Manifest, Receipt, SCHEMA_VERSION, hash_bytes, install_root, safe_id,
-    same_windows_name,
+    FileResource, Manifest, PLAN_SCHEMA_VERSION, Receipt, SCHEMA_VERSION, SelectionSource,
+    hash_bytes, inherited_selection, install_root, resolve_selection, safe_id, same_windows_name,
 };
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ pub enum Operation {
     Uninstall,
     Upgrade,
     Repair,
+    Modify,
     Recover,
 }
 
@@ -26,6 +27,7 @@ impl Operation {
             Self::Uninstall => "uninstall",
             Self::Upgrade => "upgrade",
             Self::Repair => "repair",
+            Self::Modify => "modify",
             Self::Recover => "recover",
         }
     }
@@ -66,6 +68,12 @@ pub struct InstallPlan {
     pub desktop_shortcut: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<UpgradePlan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_source: Option<SelectionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_payload_bytes: Option<u64>,
 }
 
 impl InstallPlan {
@@ -76,8 +84,28 @@ impl InstallPlan {
         install_dir: PathBuf,
         user_sid: String,
     ) -> Result<Self> {
-        let plan = Self {
-            schema_version: SCHEMA_VERSION,
+        Self::new_selected(
+            manifest,
+            operation,
+            task_id,
+            install_dir,
+            user_sid,
+            manifest.default_selection(),
+            SelectionSource::Default,
+        )
+    }
+
+    pub fn new_selected(
+        manifest: &Manifest,
+        operation: Operation,
+        task_id: String,
+        install_dir: PathBuf,
+        user_sid: String,
+        selected_components: Vec<String>,
+        source: SelectionSource,
+    ) -> Result<Self> {
+        let mut plan = Self {
+            schema_version: manifest.schema_version,
             task_id,
             operation,
             app_id: manifest.app_id.clone(),
@@ -85,18 +113,41 @@ impl InstallPlan {
             install_dir,
             user_sid,
             manifest_sha256: hash_bytes(&serde_json::to_vec(manifest)?),
-            payload_file_count: manifest.files.len() as u64,
-            payload_bytes: payload_bytes(manifest)?,
+            payload_file_count: 0,
+            payload_bytes: 0,
             start_menu_shortcut: manifest.start_menu_shortcut,
             desktop_shortcut: manifest.desktop_shortcut,
             upgrade: None,
+            selected_components: vec![],
+            selection_source: None,
+            package_payload_bytes: None,
         };
+        plan.set_selection(manifest, &selected_components, source)?;
         plan.validate(manifest)?;
         Ok(plan)
     }
 
-    /// Construct an upgrade bound to a caller-verified old receipt. The supplied
-    /// hash is computed from the original receipt bytes, not its reserialization.
+    pub fn set_selection(
+        &mut self,
+        manifest: &Manifest,
+        selection: &[String],
+        source: SelectionSource,
+    ) -> Result<()> {
+        let resolved = resolve_selection(manifest, selection)?;
+        self.payload_file_count = resolved.payload_file_count;
+        self.payload_bytes = resolved.payload_bytes;
+        if manifest.schema_version == SCHEMA_VERSION {
+            self.selected_components.clear();
+            self.selection_source = None;
+            self.package_payload_bytes = None;
+        } else {
+            self.selected_components = selection.to_vec();
+            self.selection_source = Some(source);
+            self.package_payload_bytes = Some(payload_bytes(manifest)?);
+        }
+        Ok(())
+    }
+
     pub fn new_upgrade(
         new: &Manifest,
         old: &Manifest,
@@ -105,25 +156,101 @@ impl InstallPlan {
         task_id: String,
         upgrade: UpgradePlan,
     ) -> Result<Self> {
-        let mut plan = Self::new(
+        let selection = inherited_selection(new, old, receipt)?;
+        let source = if old.schema_version == SCHEMA_VERSION && new.schema_version != SCHEMA_VERSION
+        {
+            SelectionSource::LegacyMigration
+        } else {
+            SelectionSource::Inherited
+        };
+        Self::new_upgrade_selected(
+            new,
+            old,
+            receipt,
+            previous_receipt_sha256,
+            task_id,
+            upgrade,
+            selection,
+            source,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_upgrade_selected(
+        new: &Manifest,
+        old: &Manifest,
+        receipt: &Receipt,
+        previous_receipt_sha256: &str,
+        task_id: String,
+        mut upgrade: UpgradePlan,
+        selected_components: Vec<String>,
+        source: SelectionSource,
+    ) -> Result<Self> {
+        let mut plan = Self::new_selected(
             new,
             Operation::Install,
             task_id,
             PathBuf::from(&receipt.install_dir),
             receipt.user_sid.clone(),
+            selected_components,
+            source,
         )?;
+        upgrade.selected_components = plan.selected_components.clone();
+        upgrade.previous_selected_components = receipt.selected_components.clone();
         plan.operation = Operation::Upgrade;
-        plan.desktop_shortcut = receipt
-            .shortcuts
-            .iter()
-            .any(|link| link.kind == ShortcutKind::Desktop);
-        plan.start_menu_shortcut = receipt
-            .shortcuts
-            .iter()
-            .any(|link| link.kind == ShortcutKind::StartMenu);
+        plan.copy_shortcuts(receipt);
         plan.upgrade = Some(upgrade);
         plan.validate_upgrade(new, old, receipt, previous_receipt_sha256)?;
         Ok(plan)
+    }
+
+    pub fn new_modify(
+        manifest: &Manifest,
+        receipt: &Receipt,
+        previous_receipt_sha256: &str,
+        task_id: String,
+        upgrade: UpgradePlan,
+    ) -> Result<Self> {
+        let mut plan = Self::new_selected(
+            manifest,
+            Operation::Install,
+            task_id,
+            PathBuf::from(&receipt.install_dir),
+            receipt.user_sid.clone(),
+            upgrade.selected_components.clone(),
+            SelectionSource::Explicit,
+        )?;
+        plan.operation = Operation::Modify;
+        plan.copy_shortcuts(receipt);
+        plan.upgrade = Some(upgrade);
+        plan.validate_modify(manifest, receipt, previous_receipt_sha256)?;
+        Ok(plan)
+    }
+
+    fn copy_shortcuts(&mut self, receipt: &Receipt) {
+        self.desktop_shortcut = receipt
+            .shortcuts
+            .iter()
+            .any(|link| link.kind == ShortcutKind::Desktop);
+        self.start_menu_shortcut = receipt
+            .shortcuts
+            .iter()
+            .any(|link| link.kind == ShortcutKind::StartMenu);
+    }
+
+    fn validate_previous(&self, receipt: &Receipt, digest: &str) -> Result<()> {
+        let context = self
+            .upgrade
+            .as_ref()
+            .expect("validated maintenance context");
+        ensure!(
+            self.install_dir == std::path::Path::new(&receipt.install_dir)
+                && self.user_sid == receipt.user_sid
+                && self.task_id != receipt.task_id
+                && context.previous_receipt_sha256 == digest,
+            "maintenance plan does not match the previous receipt or fresh task"
+        );
+        Ok(())
     }
 
     pub fn validate_upgrade(
@@ -135,26 +262,63 @@ impl InstallPlan {
     ) -> Result<()> {
         self.validate(new)?;
         ensure!(self.operation == Operation::Upgrade, "not an upgrade plan");
-        let upgrade = self.upgrade.as_ref().expect("validated upgrade field");
-        upgrade.validate(new, old, receipt)?;
-        ensure!(
-            self.install_dir == PathBuf::from(&receipt.install_dir)
-                && self.user_sid == receipt.user_sid
-                && self.task_id != receipt.task_id
-                && upgrade.previous_receipt_sha256 == previous_receipt_sha256,
-            "upgrade plan does not match the previous receipt or fresh task"
-        );
-        Ok(())
+        self.upgrade
+            .as_ref()
+            .expect("validated upgrade field")
+            .validate(new, old, receipt)?;
+        self.validate_previous(receipt, previous_receipt_sha256)
     }
 
-    /// Structure and manifest binding only. The coordinator still checks the current
-    /// user, resource ownership, destination conflicts, locks and backend identity.
+    pub fn validate_modify(
+        &self,
+        manifest: &Manifest,
+        receipt: &Receipt,
+        previous_receipt_sha256: &str,
+    ) -> Result<()> {
+        self.validate(manifest)?;
+        ensure!(self.operation == Operation::Modify, "not a modify plan");
+        let context = self.upgrade.as_ref().expect("validated modify context");
+        context.validate_modify(manifest, receipt)?;
+        ensure!(
+            self.start_menu_shortcut
+                == receipt
+                    .shortcuts
+                    .iter()
+                    .any(|s| s.kind == ShortcutKind::StartMenu)
+                && self.desktop_shortcut
+                    == receipt
+                        .shortcuts
+                        .iter()
+                        .any(|s| s.kind == ShortcutKind::Desktop),
+            "modify cannot change shortcut choices"
+        );
+        self.validate_previous(receipt, previous_receipt_sha256)
+    }
+
+    /// Structural binding only. Filesystem ownership and execution evidence are
+    /// validated independently by the coordinator and worker.
     pub fn validate(&self, manifest: &Manifest) -> Result<()> {
         manifest.validate()?;
         ensure!(
-            self.schema_version == SCHEMA_VERSION,
-            "unsupported plan schema"
+            self.schema_version == manifest.schema_version
+                && matches!(self.schema_version, SCHEMA_VERSION | PLAN_SCHEMA_VERSION),
+            "unsupported or mismatched plan schema"
         );
+        if self.schema_version == SCHEMA_VERSION {
+            ensure!(
+                self.selected_components.is_empty()
+                    && self.selection_source.is_none()
+                    && self.package_payload_bytes.is_none(),
+                "schema 1 plan cannot contain component fields"
+            );
+        } else {
+            ensure!(
+                self.selection_source.is_some()
+                    && self.package_payload_bytes == Some(payload_bytes(manifest)?),
+                "plan lacks selection source or complete package statistics"
+            );
+        }
+        let selected = resolve_selection(manifest, &self.selected_components)?;
         safe_id(&self.task_id)?;
         ensure!(
             self.user_sid.starts_with("S-1-")
@@ -169,24 +333,28 @@ impl InstallPlan {
             self.app_id == manifest.app_id
                 && self.app_version == manifest.app_version
                 && self.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
-                && self.payload_file_count == manifest.files.len() as u64
-                && self.payload_bytes == payload_bytes(manifest)?,
-            "plan does not match manifest"
+                && self.payload_file_count == selected.payload_file_count
+                && self.payload_bytes == selected.payload_bytes,
+            "plan does not match selected manifest resources"
         );
         match (self.operation, &self.upgrade) {
-            (Operation::Upgrade, Some(upgrade)) => {
-                upgrade.validate_new(manifest)?;
-                for private in [&upgrade.staging_dir, &upgrade.backup_dir] {
+            (Operation::Upgrade | Operation::Modify, Some(context)) => {
+                ensure!(
+                    context.selected_components == self.selected_components,
+                    "plan and maintenance selection differ"
+                );
+                context.validate_new_for(manifest, self.operation)?;
+                for private in [&context.staging_dir, &context.backup_dir] {
                     ensure!(
                         !paths_overlap(private, &self.install_dir),
-                        "upgrade staging/backup must be outside the installation directory"
+                        "maintenance staging/backup must be outside the installation directory"
                     );
                 }
             }
-            (Operation::Upgrade, None) => {
-                anyhow::bail!("upgrade requires the previous installation context")
+            (Operation::Upgrade | Operation::Modify, None) => {
+                anyhow::bail!("upgrade/modify requires the previous installation context")
             }
-            (_, Some(_)) => anyhow::bail!("upgrade context is only valid for an upgrade"),
+            (_, Some(_)) => anyhow::bail!("maintenance context is only valid for upgrade/modify"),
             (_, None) => {}
         }
         Ok(())
@@ -235,20 +403,43 @@ impl UpgradeDiff {
     /// Canonical Windows-name order. Ambiguous case-only renames and file/directory
     /// shape changes are rejected before the backend touches an existing install.
     pub fn between(old: &Manifest, new: &Manifest) -> Result<Self> {
-        use std::collections::BTreeMap;
         old.validate()?;
         new.validate()?;
+        Self::between_files(&old.files, &new.files)
+    }
+
+    pub fn between_files(old: &[FileResource], new: &[FileResource]) -> Result<Self> {
+        use std::collections::BTreeMap;
+        for files in [old, new] {
+            for file in files {
+                ensure!(
+                    crate::relative_path(&file.path)? == file.path,
+                    "diff path must be normalized"
+                );
+                ensure!(
+                    file.sha256.len() == 64 && file.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "invalid diff file hash"
+                );
+            }
+        }
         let old_files: BTreeMap<_, _> = old
-            .files
             .iter()
             .map(|file| (WindowsPath(file.path.clone()), file))
             .collect();
         let new_files: BTreeMap<_, _> = new
-            .files
             .iter()
             .map(|file| (WindowsPath(file.path.clone()), file))
             .collect();
-        for (files, other) in [(&old_files, &new_files), (&new_files, &old_files)] {
+        ensure!(
+            old_files.len() == old.len() && new_files.len() == new.len(),
+            "duplicate Windows path in diff"
+        );
+        for (files, other) in [
+            (&old_files, &new_files),
+            (&new_files, &old_files),
+            (&old_files, &old_files),
+            (&new_files, &new_files),
+        ] {
             for path in files.keys() {
                 for (position, _) in path.0.match_indices('\\') {
                     ensure!(
@@ -320,38 +511,90 @@ pub struct UpgradePlan {
     /// Conservative staging + old payload backup + new deployment estimate.
     /// The executor adds metadata/runtime overhead and checks actual free space.
     pub required_space_bytes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_selected_components: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_snapshot_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_sha256: Option<String>,
 }
 
 impl UpgradePlan {
     pub fn validate(&self, new: &Manifest, old: &Manifest, receipt: &Receipt) -> Result<()> {
-        self.validate_new(new)?;
-        old.validate()?;
+        self.validate_new_for(new, Operation::Upgrade)?;
+        self.validate_previous(new, old, receipt)
+    }
+
+    pub fn validate_modify(&self, manifest: &Manifest, receipt: &Receipt) -> Result<()> {
+        self.validate_new_for(manifest, Operation::Modify)?;
+        self.validate_previous(manifest, manifest, receipt)?;
+        ensure!(
+            self.selected_components != self.previous_selected_components,
+            "component selection is unchanged; no modification is needed"
+        );
+        ensure!(
+            self.backend_sha256 == receipt.uninstaller_sha256 && self.backend_sha256.is_some(),
+            "modify requires the installed backend identity"
+        );
+        Ok(())
+    }
+
+    fn validate_previous(&self, new: &Manifest, old: &Manifest, receipt: &Receipt) -> Result<()> {
+        receipt.validate_manifest(old)?;
         ensure!(
             new.app_id == old.app_id && receipt.app_id == old.app_id,
-            "upgrade application identity mismatch"
+            "maintenance application identity mismatch"
         );
-        ensure!(
-            receipt.schema_version == SCHEMA_VERSION
-                && receipt.app_version == old.app_version
-                && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(old)?)
-                && receipt.files == old.files,
-            "previous receipt does not match the installed manifest"
-        );
+        let selected = resolve_selection(new, &self.selected_components)?;
         ensure!(
             self.previous_version == old.app_version
                 && self.previous_manifest_sha256 == receipt.manifest_sha256
                 && self.previous_task_id == receipt.task_id
                 && self.previous_commit_id == receipt.commit_id
                 && self.installation_id == receipt.installation_id
-                && self.diff == UpgradeDiff::between(old, new)?,
-            "upgrade context does not match the previous installation"
+                && self.previous_selected_components == receipt.selected_components
+                && self.diff == UpgradeDiff::between_files(&receipt.files, &selected.files)?,
+            "maintenance context does not match previous installation"
         );
+        if old.schema_version != SCHEMA_VERSION {
+            ensure!(
+                new.schema_version != SCHEMA_VERSION,
+                "cannot migrate components back to schema 1"
+            );
+        }
         Ok(())
     }
 
-    fn validate_new(&self, new: &Manifest) -> Result<()> {
+    fn validate_new_for(&self, new: &Manifest, operation: Operation) -> Result<()> {
         new.validate()?;
-        ensure_newer_version(&self.previous_version, &new.app_version)?;
+        if operation == Operation::Modify {
+            ensure!(
+                new.schema_version == PLAN_SCHEMA_VERSION
+                    && self.previous_version == new.app_version
+                    && self.previous_manifest_sha256 == hash_bytes(&serde_json::to_vec(new)?),
+                "modify requires the same complete package build"
+            );
+            for digest in [&self.modify_snapshot_sha256, &self.backend_sha256] {
+                ensure!(
+                    digest
+                        .as_ref()
+                        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())),
+                    "modify requires snapshot and backend digests"
+                );
+            }
+            ensure!(
+                self.diff.replaced.is_empty(),
+                "modify cannot replace existing component files"
+            );
+        } else {
+            ensure_newer_version(&self.previous_version, &new.app_version)?;
+            ensure!(
+                self.modify_snapshot_sha256.is_none(),
+                "upgrade cannot contain a modify snapshot"
+            );
+        }
         for id in [
             &self.previous_task_id,
             &self.previous_commit_id,
@@ -373,30 +616,26 @@ impl UpgradePlan {
         }
         ensure!(
             !paths_overlap(&self.staging_dir, &self.backup_dir),
-            "upgrade staging and backup overlap"
+            "maintenance staging and backup overlap"
         );
-        // Reconstruct only the old resource set to validate an exhaustive, disjoint
-        // diff against the new manifest. Actual old identity is checked by validate.
-        let mut previous = new.clone();
-        previous.app_version = self.previous_version.clone();
-        previous.files = self.diff.previous_files();
-        previous.entry = previous
-            .files
-            .first()
-            .map(|file| file.path.clone())
-            .unwrap_or_default();
-        previous.presentation = None;
+        let selected = resolve_selection(new, &self.selected_components)?;
+        let previous = self.diff.previous_files();
         ensure!(
-            self.diff == UpgradeDiff::between(&previous, new)?,
-            "upgrade diff does not match new payload"
+            self.diff == UpgradeDiff::between_files(&previous, &selected.files)?,
+            "maintenance diff does not match selected payload"
         );
-        let minimum = payload_bytes(new)?
+        let previous_bytes = previous.iter().try_fold(0u64, |sum, file| {
+            sum.checked_add(file.size)
+                .ok_or_else(|| anyhow::anyhow!("previous payload size overflow"))
+        })?;
+        let minimum = selected
+            .payload_bytes
             .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(payload_bytes(&previous).ok()?))
-            .ok_or_else(|| anyhow::anyhow!("upgrade space estimate overflow"))?;
+            .and_then(|bytes| bytes.checked_add(previous_bytes))
+            .ok_or_else(|| anyhow::anyhow!("maintenance space estimate overflow"))?;
         ensure!(
             self.required_space_bytes >= minimum,
-            "upgrade space estimate is below staging/backup/deployment payload size"
+            "maintenance space estimate is below staging/backup/deployment payload size"
         );
         Ok(())
     }
@@ -418,7 +657,7 @@ fn paths_overlap(left: &std::path::Path, right: &std::path::Path) -> bool {
 }
 
 #[derive(Eq)]
-struct WindowsPath(String);
+pub(crate) struct WindowsPath(pub(crate) String);
 impl PartialEq for WindowsPath {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other).is_eq()
@@ -490,6 +729,10 @@ mod tests {
             staging_dir: std::env::temp_dir().join("AvelinM3Private").join("staging"),
             backup_dir: std::env::temp_dir().join("AvelinM3Private").join("backup"),
             required_space_bytes: 1024 * 1024,
+            selected_components: vec![],
+            previous_selected_components: vec![],
+            modify_snapshot_sha256: None,
+            backend_sha256: None,
         };
         (old, new, receipt, upgrade)
     }
@@ -520,6 +763,7 @@ mod tests {
     fn upgrade_diff_is_exhaustive_canonical_and_preserves_old_and_new_metadata() {
         let mut old = manifest();
         let resource = |path: &str, size, hash: &str| FileResource {
+            component_id: None,
             path: path.into(),
             size,
             sha256: hash.repeat(64),

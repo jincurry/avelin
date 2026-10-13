@@ -135,6 +135,9 @@ fn configured_view_preserves_shared_command_and_terminal_semantics(cx: &mut Test
             install_dir: PathBuf::from("C:\\initial"),
             desktop_shortcut: true,
             start_menu_shortcut: true,
+            selected_components: None,
+            operation: Some(avelin_core::Operation::Install),
+            migration_confirmed: false,
         }
     );
     assert_eq!(command_rx.try_recv(), Err(TryRecvError::Empty));

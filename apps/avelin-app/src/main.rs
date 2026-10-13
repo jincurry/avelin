@@ -1,3 +1,4 @@
+mod component_selection;
 mod coordinator;
 mod execution_files;
 mod failure_report;

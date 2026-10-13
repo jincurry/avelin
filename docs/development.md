@@ -134,9 +134,35 @@ pwsh -NoProfile -File tests/harness/run-rust-maintenance.ps1 `
 
 ### 结果记录
 
-当前真实进程验收包含 17 项生命周期、6 项异常中断和 17 项恢复/修复，共 40 项。每组报告分别保存实际组件摘要、进程结果和资源证据。源码测试、真实进程、可见 GUI 和环境验证分别记录，不相互替代。
+可选组件使用独立的真实进程脚本，覆盖默认/显式安装、更改、升级继承、冲突保护与中断恢复，共 29 项：
 
-本轮移除旧执行路径后重新运行源码检查与上述三组 Release 验收。之前在当前缩放下完成的安装、启动、卸载、修复和恢复 GUI 证据保留；本轮没有重复窗口或缩放测试。性能、签名及独立环境测试不在本轮范围。
+```powershell
+$componentsRoot = Join-Path $PWD ('target/rust-components/' + [Guid]::NewGuid().ToString('N'))
+pwsh -NoProfile -File tests/harness/run-rust-components.ps1 `
+  -Runtime ./target/release/avelin-app.exe `
+  -Cli ./target/release/avelin-cli.exe `
+  -RustWorker ./target/release/avelin-engine.exe `
+  -Sample ./target/release/nimbus-demo.exe `
+  -OutputRoot $componentsRoot
+```
+
+旧 schema 1 安装迁移使用另一组 8 项兼容检查，需保留旧版配套 CLI、runtime、worker，并通过 `-LegacyTools` 指向其目录。脚本会实际确认旧工具生成 schema 1，随后检查原有组件继承、新默认组件不自动加入，以及混合旧/新文件的组件必须明确选择：
+
+```powershell
+$legacyRoot = Join-Path $PWD ('target/rust-components-legacy/' + [Guid]::NewGuid().ToString('N'))
+pwsh -NoProfile -File tests/harness/run-rust-components-legacy.ps1 `
+  -Runtime ./target/release/avelin-app.exe `
+  -Cli ./target/release/avelin-cli.exe `
+  -RustWorker ./target/release/avelin-engine.exe `
+  -LegacyTools '<旧版配套工具所在目录>' `
+  -OutputRoot $legacyRoot
+```
+
+该脚本使用新的测试产品与安装目录，保留报告和证据；已完成的产品通过自身卸载入口清理。清单 GUI 的复选框、确认失效、维护切换与键盘焦点另有 headless UI 测试，它们不等同于原生像素和讲述人验收。
+
+基础真实进程验收包含 17 项生命周期、6 项异常中断和 17 项恢复/修复，共 40 项；组件由上述独立脚本扩展覆盖。每组报告保存实际组件摘要、进程结果和资源证据，以各自 `summary.json` 的用例为准。源码测试、真实进程、可见 GUI 和环境验证分别记录，不相互替代。
+
+此前安装、启动、卸载、修复和恢复的 GUI 证据保留；新增组件清单的 headless 交互测试不代表原生窗口及讲述人已经人工验收。性能、签名及独立环境测试不在本轮范围。
 
 ## 项目结构
 
@@ -161,7 +187,7 @@ GitHub 官方将 `windows-2025` 列为 Windows x64 hosted runner 标签；实际
 
 ### 维护者完整工具包验收
 
-`scripts/ci-rust-windows.ps1` 检查源码、构建 Release、收集依赖材料、生成工具包、解压校验，再使用解压组件运行 17 项生命周期、6 项中断及 17 项恢复/修复场景。
+`scripts/ci-rust-windows.ps1` 检查源码、构建 Release、收集依赖材料、生成工具包、解压校验，再使用解压组件运行生命周期、中断、恢复/修复及可选组件场景。
 
 ```powershell
 pwsh -NoProfile -File scripts/ci-rust-windows.ps1 `

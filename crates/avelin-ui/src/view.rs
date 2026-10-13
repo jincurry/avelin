@@ -19,6 +19,13 @@ use crate::state::{LaunchStatus, UiState};
 use crate::{Locale, Presentation, UiBridge, UiCommand, UiError, UiOptions, UiPhase};
 use avelin_core::Operation;
 
+#[path = "components_view.rs"]
+mod components_view;
+
+#[cfg(test)]
+#[path = "components_view_tests.rs"]
+mod components_view_tests;
+
 #[cfg(test)]
 #[path = "clipboard_view_tests.rs"]
 mod clipboard_view_tests;
@@ -239,13 +246,18 @@ fn run_inner(
 }
 
 fn window_title(options: &UiOptions) -> String {
-    if matches!(options.operation, Operation::Repair | Operation::Recover) {
+    if matches!(
+        options.operation,
+        Operation::Repair | Operation::Recover | Operation::Modify
+    ) {
         return format!(
             "{} · {}",
             options.app_name,
             match (options.operation, options.locale) {
                 (Operation::Repair, Locale::Chinese) => "修复",
                 (Operation::Repair, Locale::English) => "Repair",
+                (Operation::Modify, Locale::Chinese) => "更改组件",
+                (Operation::Modify, Locale::English) => "Change components",
                 (_, Locale::Chinese) => "恢复未完成的操作",
                 (_, Locale::English) => "Recover interrupted operation",
             }
@@ -259,7 +271,9 @@ fn window_title(options: &UiOptions) -> String {
                 Operation::Uninstall => "window.uninstall_title",
                 Operation::Upgrade => "window.upgrade_title",
                 Operation::Install => "window.title",
-                Operation::Repair | Operation::Recover => unreachable!("handled maintenance title"),
+                Operation::Repair | Operation::Recover | Operation::Modify => {
+                    unreachable!("handled maintenance title")
+                }
             },
             &[("app_name", &options.app_name)],
         )
@@ -434,6 +448,7 @@ struct InstallerView {
     desktop: bool,
     start_menu: bool,
     accepted: bool,
+    migration_confirmed: bool,
     state: UiState,
     bridge: Option<UiBridge>,
     last_demo_step: Instant,
@@ -445,13 +460,16 @@ struct InstallerView {
 
 impl InstallerView {
     fn new(
-        options: UiOptions,
+        mut options: UiOptions,
         bridge: Option<UiBridge>,
         logo: Option<Arc<RenderImage>>,
         probe_started: Option<Instant>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        for component in &mut options.components {
+            component.selected |= component.required;
+        }
         let directory = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(options.install_dir.to_string_lossy().into_owned())
@@ -464,8 +482,11 @@ impl InstallerView {
                     secondary: false,
                     shift: false,
                 } => view.start(cx),
-                InputEvent::Change if view.status_note.is_some_and(UiNotice::is_input_related) => {
-                    view.status_note = None;
+                InputEvent::Change => {
+                    view.accepted = false;
+                    if view.status_note.is_some_and(UiNotice::is_input_related) {
+                        view.status_note = None;
+                    }
                     cx.notify();
                 }
                 _ => {}
@@ -505,6 +526,7 @@ impl InstallerView {
             desktop,
             start_menu,
             accepted: false,
+            migration_confirmed: false,
             state,
             bridge,
             last_demo_step: Instant::now(),
@@ -745,7 +767,11 @@ impl InstallerView {
     }
 
     fn shows_launch(&self) -> bool {
-        !self.demo() && !self.uninstall() && !self.recover() && self.phase() == UiPhase::Succeeded
+        !self.demo()
+            && !self.uninstall()
+            && !self.recover()
+            && !self.modify()
+            && self.phase() == UiPhase::Succeeded
     }
 
     fn launch(&mut self, cx: &mut Context<Self>) {
@@ -864,7 +890,7 @@ impl InstallerView {
     }
 
     fn start(&mut self, cx: &mut Context<Self>) {
-        if !self.picker.can_edit(self.phase()) || !self.state.can_start(self.accepted) {
+        if !self.start_enabled() {
             return;
         }
         let directory = if self.fixed_directory() {
@@ -883,8 +909,17 @@ impl InstallerView {
             } else {
                 PathBuf::from(directory)
             },
-            desktop_shortcut: !self.uninstall() && !self.maintenance() && self.desktop,
-            start_menu_shortcut: !self.uninstall() && !self.maintenance() && self.start_menu,
+            desktop_shortcut: !self.uninstall()
+                && !self.maintenance()
+                && !self.modify()
+                && self.desktop,
+            start_menu_shortcut: !self.uninstall()
+                && !self.maintenance()
+                && !self.modify()
+                && self.start_menu,
+            selected_components: self.selected_components(),
+            operation: Some(self.options.operation),
+            migration_confirmed: self.migration_confirmed,
         };
         if !self.state.request_start(self.accepted) {
             return;
@@ -982,6 +1017,16 @@ impl InstallerView {
     }
 
     fn title(&self) -> String {
+        if self.modify() {
+            let (zh, en) = match self.phase() {
+                UiPhase::Ready => ("更改安装组件", "Change installed components"),
+                UiPhase::Succeeded => ("组件已更改", "Components changed"),
+                UiPhase::Failed => ("未能更改组件", "Could not change components"),
+                UiPhase::Unknown => ("结果待确认", "Result unconfirmed"),
+                _ => ("正在更改组件", "Changing components"),
+            };
+            return self.localized(zh, en);
+        }
         if self.maintenance() {
             let pair = match (self.repair(), self.phase()) {
                 (true, UiPhase::Ready) => ("检查与修复", "Inspect and repair"),
@@ -1034,6 +1079,12 @@ impl InstallerView {
     }
 
     fn description(&self) -> String {
+        if self.modify() {
+            return self.localized(
+                "勾选需要保留的组件。新增组件将安装，取消勾选的组件将移除；修改过的文件和用户新增文件会保留。",
+                "Select the components to keep. Newly selected components are installed; deselected components are removed. Changed files and added user files are preserved.",
+            );
+        }
         if self.maintenance() {
             if self.phase() == UiPhase::Ready {
                 return if self.repair() {
@@ -1091,6 +1142,9 @@ impl InstallerView {
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.modify() {
+            return self.render_modify_confirmation(cx);
+        }
         if self.maintenance() {
             return self.render_maintenance_confirmation(cx);
         }
@@ -1165,6 +1219,9 @@ impl InstallerView {
                     .text_color(muted)
                     .child(self.text("directory.hint")),
             )
+            .when(self.has_component_choices(), |container| {
+                container.child(self.render_components(cx))
+            })
             .when(!self.uninstall(), |container| {
                 container.child(
                     div()
@@ -1182,6 +1239,7 @@ impl InstallerView {
                                         return;
                                     }
                                     view.desktop = *checked;
+                                    view.accepted = false;
                                     cx.notify();
                                 })),
                         )
@@ -1195,6 +1253,7 @@ impl InstallerView {
                                         return;
                                     }
                                     view.start_menu = *checked;
+                                    view.accepted = false;
                                     cx.notify();
                                 })),
                         ),
@@ -1341,6 +1400,14 @@ impl InstallerView {
                     .aria_label(self.text("upgrade.directory"))
                     .child(self.options.install_dir.to_string_lossy().into_owned()),
             )
+            .when(self.has_component_choices(), |container| {
+                container.child(self.render_components(cx))
+            })
+            .when(
+                self.options.migration_confirmation_required
+                    || !self.options.migration_details.is_empty(),
+                |container| container.child(self.render_migration_confirmation(cx)),
+            )
             .child(
                 Checkbox::new("desktop")
                     .label(self.text("option.desktop"))
@@ -1349,6 +1416,7 @@ impl InstallerView {
                     .on_change(cx.listener(|view, checked, _, cx| {
                         if view.phase() == UiPhase::Ready {
                             view.desktop = *checked;
+                            view.accepted = false;
                             cx.notify();
                         }
                     })),
@@ -1361,6 +1429,7 @@ impl InstallerView {
                     .on_change(cx.listener(|view, checked, _, cx| {
                         if view.phase() == UiPhase::Ready {
                             view.start_menu = *checked;
+                            view.accepted = false;
                             cx.notify();
                         }
                     })),
@@ -1396,6 +1465,9 @@ impl InstallerView {
                     .child(self.title()),
             )
             .child(div().text_sm().child(self.description()))
+            .when(self.can_switch_maintenance(), |container| {
+                container.child(self.render_maintenance_switch(cx))
+            })
             .child(
                 div()
                     .id("maintenance-directory")
@@ -1532,7 +1604,7 @@ impl Render for InstallerView {
             .active(rgb(self.brand.active).into());
         let phase = self.phase();
         let main = phase == UiPhase::Ready;
-        let start_enabled = self.picker.can_edit(phase) && self.state.can_start(self.accepted);
+        let start_enabled = self.start_enabled();
         if phase != self.last_rendered_phase {
             let previous = self.last_rendered_phase;
             self.last_rendered_phase = phase;
@@ -1720,7 +1792,18 @@ impl Render for InstallerView {
                                 self.localized("安装维护", "Installation maintenance")
                             } else {
                                 self.text("footer.install")
-                            })),
+                            }))
+                            .when(
+                                main && self.has_component_choices() && !self.maintenance(),
+                                |container| {
+                                    container.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(muted)
+                                            .child(self.component_size_summary()),
+                                    )
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -1734,7 +1817,11 @@ impl Render for InstallerView {
                                         // Keep readable text on an opaque enabled button; applying this
                                         // only when enabled preserves the kit's disabled styling.
                                         .when(start_enabled, |button| button.bg(primary_background))
-                                        .label(if self.demo() {
+                                        .label(if self.modify() && !self.components_changed() {
+                                            self.localized("无需更改", "No changes")
+                                        } else if self.modify() {
+                                            self.localized("应用更改", "Apply changes")
+                                        } else if self.demo() {
                                             self.text("action.demo")
                                         } else if self.uninstall() {
                                             self.text("action.uninstall")

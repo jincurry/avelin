@@ -144,6 +144,41 @@ def main():
         reject("m3/placeholder-" + label,
                dict(presentation, strings={"en-US": {"upgrade.versions": value}}), "presentation")
 
+    component_manifest = example("examples/components-manifest.json", "model", "Manifest")
+    component_plan = example("examples/components-install-plan.json", "model", "InstallPlan")
+    component_receipt = example("examples/components-receipt.json", "model", "Receipt")
+    modify_plan = example("examples/components-modify-plan.json", "model", "InstallPlan")
+    example("examples/components-command.json", "protocol", "TaskCommand")
+    # Schema branches reject component fields on legacy records and require
+    # explicit ownership/selection on v2. Membership, sorting, exact file-set
+    # equality, hashes and operation result evidence remain Rust obligations.
+    reject("components/legacy-catalog", dict(manifest, components=component_manifest["components"]), "model", "Manifest")
+    reject("components/legacy-file-owner", dict(manifest, files=component_manifest["files"]), "model", "Manifest")
+    reject("components/legacy-selection", dict(receipt, selected_components=["core"]), "model", "Receipt")
+    reject("components/legacy-plan-selection", dict(plan, selected_components=["core"]), "model", "InstallPlan")
+    reject("components/v2-missing-owner", dict(component_manifest, files=manifest["files"]), "model", "Manifest")
+    reject("components/v2-missing-core", dict(component_manifest, components=component_manifest["components"][1:]), "model", "Manifest")
+    reject("components/v2-duplicate-core", dict(component_manifest, components=component_manifest["components"] + [component_manifest["components"][0]]), "model", "Manifest")
+    for key in ("selected_components", "selection_source", "package_payload_bytes"):
+        missing = copy.deepcopy(component_plan)
+        missing.pop(key)
+        reject("components/missing-plan-" + key, missing, "model", "InstallPlan")
+    for selected in ([], ["extra"], ["core", "core"], ["core", "UPPER"]):
+        reject("components/invalid-selection-" + repr(selected), dict(component_receipt, selected_components=selected), "model", "Receipt")
+    core = component_manifest["components"][0]
+    optional = component_manifest["components"][1]
+    for value in (dict(core, required=False), dict(core, default_selected=False), dict(optional, required=True), dict(optional, requires=["core"]), dict(optional, name={"en-US": "Extra"})):
+        reject("components/invalid-definition-" + repr(value), value, "model", "ComponentDefinition")
+    reject("modify/schema-1", dict(modify_plan, schema_version=1), "model", "InstallPlan")
+    reject("modify/missing-context", {k:v for k,v in modify_plan.items() if k != "upgrade"}, "model", "InstallPlan")
+    for key in ("modify_snapshot_sha256", "backend_sha256", "selected_components", "previous_selected_components"):
+        missing = copy.deepcopy(modify_plan)
+        missing["upgrade"].pop(key)
+        reject("modify/missing-" + key, missing, "model", "InstallPlan")
+    replacement = copy.deepcopy(modify_plan)
+    replacement["upgrade"]["diff"]["replaced"] = [{"before": component_manifest["files"][0], "after": component_manifest["files"][0]}]
+    reject("modify/replacement-forbidden", replacement, "model", "InstallPlan")
+
     def completed_run(run, generation):
         run = run.resolve()
         summary = read(run / "summary.json")

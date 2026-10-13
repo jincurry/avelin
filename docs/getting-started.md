@@ -32,7 +32,7 @@ MyInstaller/
 配置目录必须在载荷之外。载荷位于配置目录内时，生成的 TOML 使用相对路径；外部载荷使用绝对路径。现有配置不会被覆盖。
 
 ```toml
-schema_version = 1
+schema_version = 2
 
 [app]
 id = "com.example.myapp"
@@ -47,7 +47,18 @@ directory = "payload"
 directory_name = "MyApp"
 desktop_shortcut = false
 start_menu_shortcut = true
+
+[[components]]
+id = "core"
+required = true
+name = { "zh-CN" = "主程序", "en-US" = "Application" }
+description = { "zh-CN" = "应用运行所需文件", "en-US" = "Files required to run the application" }
+paths = ["MyApp.exe"]
 ```
+
+以上最小例子只有一个 EXE；真实目录的每个文件都需要归属。当前 `init` 会把扫描到的全部文件加入 `core.paths`。只有 `core` 时不显示组件选择区。需要选装时，将文件从 `core` 拆出并定义 `[[components]]`，见[可选组件使用指南](optional-components.md)与[通用示例](../examples/components/README.md)。旧 schema 1 配置仍受支持。
+
+组件能力需要当前源码构建的配套工具，已发布的 `v0.1.0-preview.1` 二进制尚不支持。
 
 品牌配置参考 [Nimbus 配置](../examples/nimbus/avelin-m1.toml)、[中文覆盖](../examples/nimbus/locales/zh-CN.json)与[英文覆盖](../examples/nimbus/locales/en-US.json)。展示结构见 [presentation schema](schemas/presentation.schema.json)，仅支持注册的键和正确占位符。
 
@@ -106,3 +117,16 @@ Rust 任务使用原始 Setup 检查，再明确执行恢复：
 默认补回缺失资源，保留已修改的文件并在结果中列出。需要恢复修改过的受管文件时，可明确添加 `--repair-overwrite`，程序先备份再替换。用户数据和未知文件保持原样。修复前如果存在未完成事务，须先恢复。界面与静默入口共用资源保护规则，细节见[恢复与修复](maintenance.md)。
 
 操作限制、取消和结果解释见[兼容约定](compatibility.md)。Nimbus 是测试样例，不能代替真实应用验收。
+
+## 安装后更改组件
+
+双击同版本同构建的原始 Setup，在维护页选“更改组件”，勾选最终需要保留的内容。清单显示将添加/移除的项，确认后执行；没有改动时不能提交。修复只恢复原来已选的内容，不会补装未选择的组件。
+
+静默模式明确传入完整目标集合：
+
+```powershell
+& '<原始Setup.exe>' --silent --operation modify --install-dir '<原安装目录>' `
+  --components core,component-a --report '<新的报告路径>'
+```
+
+`core,component-a` 表示最终只选择这两项，而不是往当前安装追加。升级及旧记录迁移规则见[可选组件](optional-components.md)。

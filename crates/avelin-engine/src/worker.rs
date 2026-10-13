@@ -195,12 +195,14 @@ fn launch_installed_uninstaller() -> Result<i32> {
     let (_receipt_pin, receipt_bytes) =
         read_pinned(&root.join(avelin_core::RECEIPT_NAME), 32 * 1024 * 1024)?;
     let receipt: Receipt = serde_json::from_slice(&receipt_bytes)?;
-    let plan = InstallPlan::new(
+    let plan = InstallPlan::new_selected(
         &manifest,
         Operation::Uninstall,
         uuid::Uuid::new_v4().to_string(),
         root.to_path_buf(),
         transport::current_user_sid()?,
+        receipt.selection(&manifest)?,
+        avelin_core::SelectionSource::Inherited,
     )?;
     validate_candidate(&plan, &manifest, &receipt)?;
     ensure!(
@@ -275,14 +277,15 @@ fn verify_session(session: &Path, plan: &InstallPlan, coordinator_pid: u32) -> R
 }
 
 fn validate_candidate(plan: &InstallPlan, manifest: &Manifest, receipt: &Receipt) -> Result<()> {
+    receipt.validate_manifest(manifest)?;
+    let selected = avelin_core::resolve_selection(manifest, &plan.selected_components)?;
     ensure!(
-        receipt.schema_version == avelin_core::SCHEMA_VERSION
-            && receipt.app_id == plan.app_id
+        receipt.app_id == plan.app_id
             && receipt.app_version == plan.app_version
             && receipt.user_sid == plan.user_sid
             && receipt.manifest_sha256 == plan.manifest_sha256
             && same_path(Path::new(&receipt.install_dir), &plan.install_dir)
-            && receipt.files == manifest.files,
+            && receipt.files == selected.files,
         "receipt candidate differs from task intent"
     );
     avelin_core::safe_id(&receipt.installation_id)?;

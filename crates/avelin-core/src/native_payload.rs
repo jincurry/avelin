@@ -216,6 +216,7 @@ mod tests {
     fn manifest() -> Manifest {
         Manifest {
             schema_version: SCHEMA_VERSION,
+            components: vec![],
             app_id: "dev.avelin.native-fixture".into(),
             app_name: "Native fixture".into(),
             app_version: "1.0.0".into(),
@@ -228,6 +229,7 @@ mod tests {
             files: [("app.exe", &b"app"[..]), (r"中文\empty.txt", &b""[..])]
                 .into_iter()
                 .map(|(path, bytes)| FileResource {
+                    component_id: None,
                     path: path.into(),
                     size: bytes.len() as u64,
                     sha256: hash_bytes(bytes),
@@ -255,6 +257,39 @@ mod tests {
         assert_eq!(parsed.runtime, b"runtime");
         assert_eq!(parsed.runtime.as_ptr(), bytes[32..].as_ptr());
         assert_eq!(parsed.files, [b"app".as_slice(), b"".as_slice()]);
+    }
+
+    #[test]
+    fn component_selection_preserves_full_payload_offsets_and_hash_validation() {
+        let mut manifest = manifest();
+        manifest.schema_version = crate::MANIFEST_SCHEMA_VERSION;
+        let core = crate::ComponentDefinition::core();
+        let mut optional = core.clone();
+        optional.id = "extra".into();
+        optional.required = false;
+        optional.default_selected = false;
+        manifest.components = vec![core, optional];
+        manifest.files[0].component_id = Some("core".into());
+        manifest.files[1].component_id = Some("extra".into());
+        let mut bytes = encoded();
+        let parsed = NativePayload::parse(&bytes, &manifest).unwrap();
+        assert_eq!(parsed.files.len(), 2);
+        assert_eq!(
+            manifest
+                .resolve_selection(&["core".into()])
+                .unwrap()
+                .files
+                .len(),
+            1
+        );
+        // Even the unselected optional file's length is checked. A reader must
+        // never reinterpret a complete payload using a filtered manifest.
+        let optional_length_offset = bytes.len() - 8;
+        bytes[optional_length_offset] = 1;
+        assert!(NativePayload::parse(&bytes, &manifest).is_err());
+        bytes = encoded();
+        manifest.files[1].sha256 = hash_bytes(b"different optional content");
+        assert!(NativePayload::parse(&bytes, &manifest).is_err());
     }
 
     #[test]

@@ -149,7 +149,7 @@ pub fn repair_inputs(manifest: &Manifest, target: &Path, sid: &str) -> Result<Re
     ] {
         avelin_core::safe_id(id)?;
     }
-    let mut expected: Vec<_> = manifest
+    let mut expected: Vec<_> = receipt
         .files
         .iter()
         .map(|file| (target.join(&file.path), file.sha256.clone()))

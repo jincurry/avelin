@@ -20,8 +20,8 @@ flowchart LR
 ## 阅读顺序
 
 1. `apps/avelin-cli/src/main.rs`：工具命令；`init.rs` 生成配置，`components.rs` 解析组件，`config.rs` 读取配置，`build_output.rs` 保护输出，`native_builder.rs` 打包 Rust worker 与载荷。
-2. `crates/avelin-core/src/`：配置、载荷、包格式、安装记录、计划和协议。
-3. `apps/avelin-app/src/coordinator.rs`：会话、任务锁、后端进程、GUI/静默流程和结果核验。
+2. `crates/avelin-core/src/`：配置、载荷、包格式、安装记录、计划和协议；`components.rs` 验证文件归属、组件选择与旧记录迁移。
+3. `apps/avelin-app/src/coordinator.rs`：会话、任务锁、后端进程、GUI/静默流程和结果核验；`component_selection.rs` 解析默认、继承、显式及维护选集。
 4. `crates/avelin-engine/src/`：Rust worker、部署事务、文件归属、系统入口和恢复日志。
 5. `crates/avelin-ui/src/`：界面和输入行为。
 
@@ -31,11 +31,13 @@ flowchart LR
 
 | 数据 | 作用 |
 |---|---|
-| Manifest | 包里的身份、版本、载荷摘要和展示资源 |
-| InstallPlan / UpgradePlan | 当前任务操作、选择及核验过的升级差异 |
-| Receipt | 已提交安装的身份、版本、资源归属与提交关联 |
+| Manifest | 包里的身份、版本、全部组件及文件归属、载荷摘要和展示资源 |
+| InstallPlan / UpgradePlan | 当前任务操作、冻结选集及核验过的升级/更改差异 |
+| Receipt | 已提交安装的身份、版本、实际选集与资源归属、提交关联 |
 
 任务日志描述执行中的变更，receipt 描述已提交状态，两者不可互代。UI 快照用于显示，不能充当磁盘成功证据。字段见[本地 schemas](schemas/README.md)。
+
+组件模型使用独立 schema 2 版本常量，保留旧 schema 1 的省略字段和摘要兼容。包完整性始终验证全部组件；部署、修复与卸载使用经过归属校验的选集。UI 在一条 Start 命令里提交操作、完整选集及必要迁移确认，协调器重新验证安装状态后冻结计划；GUI 的本地勾选不直接修改磁盘。
 
 ## 包装和执行边界
 
@@ -52,5 +54,7 @@ Rust 引擎在会话内保存 `engine-journal.jsonl`（安装、卸载、修复�
 `diagnose` 保持只读；`recover` 先检查，显式确认后经认证 worker 执行恢复。原进程必须停止，正常 Rust 事务和恢复共用产品互斥。执行层从经核验的包与安装归属重建目标集合，拒绝会话里的任意越界写入指令。未提交事务回退，已提交事务核验确认，最终状态确认后才解除遗留锁和标记。旧记录缺少必要证据时拒绝。
 
 `repair` 使用与原安装一致的包补回缺失资源，默认保留修改项；显式恢复修改项前先备份。修复保持产品版本和安装实例，经过与正常部署一致的准备、变更、核验和提交过程；修复中断也能使用恢复入口。应用用户数据不参与修复。详细行为见[恢复与修复](maintenance.md)。
+
+`modify` 使用同版本同构建原包增删组件，复用升级差异、备份和提交机制，并绑定更改前的实际资源快照。未变化组件原有的修改或缺失状态保持不变，移除组件时保留修改过的文件；它不隐式执行修复。结果提交新的选集，异常恢复仍按原冻结计划和持久证据处理。
 
 路径、摘要、用户身份、实例互斥和资源归属均属于执行规则。卸载只删除符合归属与摘要要求的资源，保留未知内容及已修改资源。完整行为见[兼容约定](compatibility.md)。

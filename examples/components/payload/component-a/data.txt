@@ -1,0 +1,4 @@
+Optional component A
+
+This file is installed only when component-a is selected.
+It is an example payload, not a feature of Avelin itself.

@@ -41,6 +41,11 @@ def main():
     for result in ("succeeded", "cancelled", "failed", "unknown"):
         check(f"examples/replay-{result}.json", "protocol", "BackendEvent", array=True)
     presentation = check("presentation.example.json", "presentation")
+    check("examples/components-manifest.json", "model", "Manifest")
+    check("examples/components-install-plan.json", "model", "InstallPlan")
+    check("examples/components-receipt.json", "model", "Receipt")
+    check("examples/components-modify-plan.json", "model", "InstallPlan")
+    check("examples/components-command.json", "protocol", "TaskCommand")
     with_ui = copy.deepcopy(manifest)
     with_ui["presentation"] = presentation
     validator("model", "Manifest").validate(with_ui)

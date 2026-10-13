@@ -260,6 +260,8 @@ pub fn prepare(
     sid: &str,
     desktop: bool,
     start_menu: bool,
+    selected: &[String],
+    modify: bool,
 ) -> Result<PreviousInstallation> {
     manifest.validate()?;
     avelin_core::install_root(target)?;
@@ -278,24 +280,33 @@ pub fn prepare(
         "upgrade product identity conflicts with the existing installation"
     );
     // Semantic precedence deliberately ignores build metadata.
-    avelin_core::model::ensure_newer_version(&old.app_version, &manifest.app_version)?;
+    if modify {
+        ensure!(
+            avelin_core::hash_bytes(&serde_json::to_vec(&old)?)
+                == avelin_core::hash_bytes(&serde_json::to_vec(manifest)?),
+            "modify requires the original matching package"
+        );
+    } else {
+        avelin_core::model::ensure_newer_version(&old.app_version, &manifest.app_version)?;
+    }
+    let selected_files = avelin_core::resolve_selection(manifest, selected)?.files;
     let registration =
         registration(&old.app_id)?.context("upgrade requires the existing product registration")?;
     verify_registration(&registration, &old, target)?;
     let mut backup = Vec::new();
     let mut preserved = Vec::new();
     let mut previously_absent = Vec::new();
-    for file in &old.files {
+    for file in &receipt.files {
         let path = target.join(&file.path);
         if let Some(current) = observe(&path)? {
             if current.sha256 == file.sha256 {
                 backup.push(current);
             } else {
                 ensure!(
-                    !manifest
-                        .files
-                        .iter()
-                        .any(|new| same_relative(&new.path, &file.path)),
+                    modify
+                        || !selected_files
+                            .iter()
+                            .any(|new| same_relative(&new.path, &file.path)),
                     "upgrade would overwrite a modified installed file: {}",
                     path.display()
                 );
@@ -305,14 +316,19 @@ pub fn prepare(
             previously_absent.push(path);
         }
     }
-    for file in &manifest.files {
+    for file in &selected_files {
         let path = target.join(&file.path);
         check_destination(&path, target)?;
         if path.try_exists()? {
             ensure!(
-                backup
-                    .iter()
-                    .any(|item| resources::same_path(&item.path, &path)),
+                (modify
+                    && receipt
+                        .files
+                        .iter()
+                        .any(|old| same_relative(&old.path, &file.path)))
+                    || backup
+                        .iter()
+                        .any(|item| resources::same_path(&item.path, &path)),
                 "upgrade destination conflicts with an unknown or modified resource: {}",
                 path.display()
             );
@@ -381,6 +397,9 @@ pub fn prepare(
                 sha256: String::new(),
             });
         }
+    }
+    if modify {
+        shortcuts = receipt.shortcuts.clone();
     }
     Ok(PreviousInstallation {
         manifest: old,
@@ -458,12 +477,11 @@ pub fn verify_preserved(previous: &PreviousInstallation) -> Result<()> {
 
 pub fn verify_removed(
     previous: &PreviousInstallation,
-    manifest: &Manifest,
+    selected_files: &[avelin_core::FileResource],
     target: &Path,
 ) -> Result<()> {
-    for old in &previous.manifest.files {
-        if manifest
-            .files
+    for old in &previous.receipt.files {
+        if selected_files
             .iter()
             .any(|new| same_relative(&new.path, &old.path))
         {

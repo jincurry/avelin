@@ -1,9 +1,14 @@
 use anyhow::{Context, Result, bail, ensure};
+pub mod components;
 pub mod model;
 pub mod native_payload;
 pub mod presentation;
 pub mod protocol;
 pub mod session;
+pub use components::{
+    ComponentDefinition, LegacySelection, SelectedResources, SelectionSource, inherited_selection,
+    legacy_selection, parse_selection, resolve_selection,
+};
 pub use model::{
     FileReplacement, InstallPlan, Operation, ShortcutKind, ShortcutRecord, UpgradeDiff, UpgradePlan,
 };
@@ -20,6 +25,10 @@ use std::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
+pub const MANIFEST_SCHEMA_VERSION: u32 = 2;
+pub const PLAN_SCHEMA_VERSION: u32 = 2;
+pub const RECEIPT_SCHEMA_VERSION: u32 = 2;
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
 pub const RECEIPT_NAME: &str = ".avelin-receipt.json";
 pub const MAGIC: &[u8; 16] = b"AVELIN-M0-PACK01";
 pub const TRAILER_SIZE: u64 = 72;
@@ -30,6 +39,8 @@ pub struct FileResource {
     pub path: String,
     pub size: u64,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +62,8 @@ pub struct Manifest {
     /// A package default; each task records its actual choice in InstallPlan.
     #[serde(default, skip_serializing_if = "is_false")]
     pub desktop_shortcut: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ComponentDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +86,8 @@ pub struct Receipt {
     pub files: Vec<FileResource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shortcuts: Vec<ShortcutRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_components: Vec<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -236,9 +251,13 @@ pub fn install_root(path: &Path) -> Result<()> {
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == SCHEMA_VERSION,
+            matches!(
+                self.schema_version,
+                SCHEMA_VERSION | MANIFEST_SCHEMA_VERSION
+            ),
             "unsupported manifest schema"
         );
+        components::validate_manifest_components(self)?;
         safe_id(&self.app_id)?;
         if let Some(presentation) = &self.presentation {
             presentation.validate()?;
@@ -553,6 +572,7 @@ mod tests {
     fn manifest(paths: &[&str]) -> Manifest {
         Manifest {
             schema_version: SCHEMA_VERSION,
+            components: vec![],
             app_id: "com.example.core-test".into(),
             app_name: "中文 ${Brand}".into(),
             app_version: "1.2.3".into(),
@@ -562,6 +582,7 @@ mod tests {
             files: paths
                 .iter()
                 .map(|path| FileResource {
+                    component_id: None,
                     path: (*path).into(),
                     size: 0,
                     sha256: hash_bytes(b""),
@@ -739,6 +760,7 @@ mod tests {
         let mut value = manifest(&["files\\item-00000.bin"]);
         value.files = (0..50_000)
             .map(|index| FileResource {
+                component_id: None,
                 path: format!("files\\item-{:05}.bin", (index * 7919) % 50_000),
                 size: 0,
                 sha256: "a".repeat(64),
@@ -751,6 +773,7 @@ mod tests {
             start.elapsed()
         );
         value.files.push(FileResource {
+            component_id: None,
             path: "files\\next.bin".into(),
             size: 0,
             sha256: "a".repeat(64),

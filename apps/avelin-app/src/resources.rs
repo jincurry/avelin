@@ -113,14 +113,13 @@ pub fn validate_receipt(
     target: &Path,
     user_sid: &str,
 ) -> Result<()> {
+    receipt.validate_manifest(manifest)?;
     ensure!(
-        receipt.schema_version == avelin_core::SCHEMA_VERSION
-            && receipt.app_id == manifest.app_id
+        receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
             && receipt.user_sid == user_sid
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
-            && same_path(Path::new(&receipt.install_dir), target)
-            && receipt.files == manifest.files,
+            && same_path(Path::new(&receipt.install_dir), target),
         "receipt identity, ownership or file inventory mismatch"
     );
     let mut seen = BTreeSet::new();
@@ -172,6 +171,13 @@ pub fn confirm_owned_hash(path: &Path, expected: &str) -> Result<String> {
 /// A nonempty directory is usable only when every owned destination is absent.
 /// Existing unrelated files/directories are neither adopted nor deleted.
 pub fn validate_install_destination(target: &Path, manifest: &Manifest) -> Result<()> {
+    validate_selected_destination(target, &manifest.files)
+}
+
+pub fn validate_selected_destination(
+    target: &Path,
+    files: &[avelin_core::FileResource],
+) -> Result<()> {
     avelin_core::install_root(target)?;
     ensure!(
         !target.exists() || target.is_dir(),
@@ -179,7 +185,7 @@ pub fn validate_install_destination(target: &Path, manifest: &Manifest) -> Resul
     );
     for relative in [RECEIPT_NAME, "uninstall.exe", ".avelin"]
         .into_iter()
-        .chain(manifest.files.iter().map(|file| file.path.as_str()))
+        .chain(files.iter().map(|file| file.path.as_str()))
     {
         let path = target.join(relative);
         reject_reparse(&path)?;
@@ -465,6 +471,7 @@ mod tests {
         let manifest = fixture.manifest();
         fs::write(fixture.0.join(&manifest.entry), b"abc").unwrap();
         let mut receipt = Receipt {
+            selected_components: vec![],
             schema_version: 1,
             app_id: manifest.app_id.clone(),
             app_version: manifest.app_version.clone(),

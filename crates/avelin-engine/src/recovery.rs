@@ -1,4 +1,4 @@
-//! Cross-process compensation for schema-2 native transactions. The journal is
+//! Cross-process compensation for schema-2/3 native transactions. The journal is
 //! evidence, never an arbitrary list of filesystem commands. All destinations
 //! are reconstructed from the package and original ownership receipt.
 use crate::{
@@ -128,6 +128,10 @@ pub(crate) struct RecoveryRecord {
     backup: Vec<Backup>,
     preserved: Vec<Resource>,
     absent_directories: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    absent_resources: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modify_snapshot: Option<crate::ModifySnapshot>,
     registration: system::RegistrationSnapshot,
     next_registration: system::RegistrationSnapshot,
 }
@@ -137,6 +141,8 @@ pub(crate) fn make_record(
     stage: &[Staged],
     backup: &[Backup],
     preserved: &[Resource],
+    absent_resources: &[PathBuf],
+    modify_snapshot: Option<&crate::ModifySnapshot>,
     before: Option<&system::Registration>,
     after: Option<&system::Registration>,
 ) -> Result<RecoveryRecord> {
@@ -174,7 +180,10 @@ pub(crate) fn make_record(
             }
         }
     }
-    let original_manifest = if request.plan.operation == Operation::Upgrade {
+    let original_manifest = if matches!(
+        request.plan.operation,
+        Operation::Upgrade | Operation::Modify
+    ) {
         Some(serde_json::from_slice(&read(
             &request.session_dir.join("previous-manifest.json"),
         )?)?)
@@ -182,7 +191,11 @@ pub(crate) fn make_record(
         None
     };
     Ok(RecoveryRecord {
-        schema_version: 2,
+        schema_version: if request.plan.schema_version >= 2 {
+            3
+        } else {
+            2
+        },
         commit_protocol: "durable_commit_seal_v1".into(),
         plan: request.plan.clone(),
         receipt: request.receipt.clone(),
@@ -194,6 +207,8 @@ pub(crate) fn make_record(
         backup: backup.to_vec(),
         preserved: preserved.to_vec(),
         absent_directories: directories.into_iter().collect(),
+        absent_resources: absent_resources.to_vec(),
+        modify_snapshot: modify_snapshot.cloned(),
         registration: system::registration_expected(before),
         next_registration: system::registration_expected(after),
     })
@@ -264,16 +279,44 @@ struct Loaded {
 fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Path) -> Result<()> {
     let root = &record.plan.install_dir;
     let mut allowed = BTreeSet::new();
-    for m in std::iter::once(manifest).chain(record.original_manifest.as_ref()) {
-        m.validate()?;
-        ensure!(
-            m.app_id == manifest.app_id,
-            "previous manifest belongs to another product"
-        );
-        for file in &m.files {
-            allowed.insert(key(&root.join(&file.path)));
+    record.receipt.validate_manifest(manifest)?;
+    let previous = match record.plan.operation {
+        Operation::Upgrade | Operation::Modify => {
+            let bytes = read(&session.join("previous-receipt.json"))?;
+            let receipt: Receipt = serde_json::from_slice(&bytes)?;
+            let old = record
+                .original_manifest
+                .as_ref()
+                .context("original manifest missing")?;
+            receipt.validate_manifest(old)?;
+            Some(receipt)
         }
+        Operation::Repair => Some(serde_json::from_slice::<Receipt>(&read(
+            &session.join("prior-receipt.json"),
+        )?)?),
+        Operation::Uninstall => Some(record.receipt.clone()),
+        _ => None,
+    };
+    for file in record
+        .receipt
+        .files
+        .iter()
+        .chain(previous.as_ref().into_iter().flat_map(|r| &r.files))
+    {
+        allowed.insert(key(&root.join(&file.path)));
     }
+    let next_files: BTreeMap<_, _> = record
+        .receipt
+        .files
+        .iter()
+        .map(|f| (key(&root.join(&f.path)), f))
+        .collect();
+    let previous_files: BTreeSet<_> = previous
+        .as_ref()
+        .into_iter()
+        .flat_map(|r| &r.files)
+        .map(|f| key(&root.join(&f.path)))
+        .collect();
     for name in [
         RECEIPT_NAME,
         ".avelin/manifest.json",
@@ -303,6 +346,27 @@ fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Pa
     let mut stages = BTreeSet::new();
     for item in &record.stage {
         check(&item.resource)?;
+        if let Some(file) = next_files.get(&key(&item.resource.path)) {
+            ensure!(
+                item.resource.sha256 == file.sha256 && item.resource.size == file.size,
+                "staged component resource differs from selected manifest baseline"
+            );
+            ensure!(
+                record.plan.operation != Operation::Modify
+                    || !previous_files.contains(&key(&item.resource.path)),
+                "component change attempted to rewrite an unchanged resource"
+            );
+        } else {
+            ensure!(
+                !previous_files.contains(&key(&item.resource.path)),
+                "retired component was staged for deployment"
+            );
+            ensure!(
+                record.plan.operation != Operation::Modify
+                    || key(&item.resource.path) == key(&root.join(RECEIPT_NAME)),
+                "component change recovery cannot replace internal resources or shortcuts"
+            );
+        }
         ensure!(
             stages.insert(key(&item.resource.path))
                 && item.source.parent() == Some(session.join("staging").as_path()),
@@ -313,6 +377,74 @@ fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Pa
             fs::metadata(&item.source)?.len() == item.resource.size,
             "staging size mismatch"
         );
+        if key(&item.resource.path) == key(&root.join(RECEIPT_NAME)) {
+            let staged: Receipt = serde_json::from_slice(&read(&item.source)?)?;
+            staged.validate_manifest(manifest)?;
+            let mut expected = record.receipt.clone();
+            expected.uninstaller_sha256 = staged.uninstaller_sha256.clone();
+            expected.shortcuts = staged.shortcuts.clone();
+            ensure!(
+                serde_json::to_value(&staged)? == serde_json::to_value(&expected)?,
+                "recovery receipt publication differs from frozen component intent"
+            );
+            let worker_hash = record
+                .stage
+                .iter()
+                .find(|v| key(&v.resource.path) == key(&root.join("uninstall.exe")))
+                .map(|v| v.resource.sha256.as_str())
+                .or_else(|| {
+                    previous
+                        .as_ref()
+                        .and_then(|r| r.uninstaller_sha256.as_deref())
+                });
+            ensure!(
+                staged.uninstaller_sha256.as_deref() == worker_hash && worker_hash.is_some(),
+                "recovery receipt worker digest differs from maintenance resources"
+            );
+            let mut kinds = BTreeSet::new();
+            for shortcut in &staged.shortcuts {
+                ensure!(
+                    kinds.insert(shortcut.kind)
+                        && key(Path::new(&shortcut.path))
+                            == key(&system::shortcut_path(&manifest.app_id, shortcut.kind)?)
+                        && key(Path::new(&shortcut.target)) == key(&root.join(&manifest.entry)),
+                    "recovery receipt shortcut ownership differs"
+                );
+                let resource = record
+                    .stage
+                    .iter()
+                    .map(|s| &s.resource)
+                    .chain(record.preserved.iter())
+                    .find(|r| key(&r.path) == key(Path::new(&shortcut.path)));
+                ensure!(
+                    resource.is_some_and(|r| r.sha256 == shortcut.sha256)
+                        || (record.plan.operation == Operation::Repair
+                            && previous
+                                .as_ref()
+                                .is_some_and(|r| r.shortcuts.contains(shortcut))),
+                    "recovery receipt shortcut digest differs from staged or preserved resources"
+                );
+            }
+            ensure!(
+                kinds.contains(&avelin_core::ShortcutKind::Desktop) == record.plan.desktop_shortcut
+                    && kinds.contains(&avelin_core::ShortcutKind::StartMenu)
+                        == record.plan.start_menu_shortcut,
+                "recovery receipt shortcut choices differ from plan"
+            );
+        }
+    }
+    if matches!(
+        record.plan.operation,
+        Operation::Install | Operation::Upgrade | Operation::Modify
+    ) {
+        for name in next_files.keys() {
+            if record.plan.operation != Operation::Modify || !previous_files.contains(name) {
+                ensure!(
+                    stages.contains(name),
+                    "recovery omits a selected component deployment"
+                );
+            }
+        }
     }
     let mut backups = BTreeSet::new();
     for (index, item) in record.backup.iter().enumerate() {
@@ -338,6 +470,23 @@ fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Pa
             "preserved resource overlaps mutation"
         );
         confirm(&item.path, &item.sha256)?;
+    }
+    let mut absent = BTreeSet::new();
+    for path in &record.absent_resources {
+        ensure!(
+            record.plan.operation == Operation::Modify
+                && allowed.contains(&key(path))
+                && absent.insert(key(path))
+                && !stages.contains(&key(path))
+                && !backups.contains(&key(path))
+                && !preserved.contains(&key(path)),
+            "invalid missing component state"
+        );
+        avelin_core::reject_reparse(path)?;
+        ensure!(
+            !path.try_exists()?,
+            "missing component resource appeared during recovery"
+        );
     }
     for dir in &record.absent_directories {
         ensure!(inside(dir, root), "directory evidence escapes installation");
@@ -369,16 +518,31 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
     let bytes = read(&request.session.join("engine-recovery.json"))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     ensure!(
-        value["schema_version"] == 2,
+        value["schema_version"] == 2 || value["schema_version"] == 3,
         "legacy recovery evidence is insufficient; keep it for manual inspection"
     );
     let record: RecoveryRecord = serde_json::from_slice(&bytes)?;
     let record_hash = hash_bytes(&bytes);
     ensure!(
-        record.schema_version == 2 && record.commit_protocol == "durable_commit_seal_v1",
+        matches!(record.schema_version, 2 | 3)
+            && record.commit_protocol == "durable_commit_seal_v1",
         "unsupported recovery protocol"
     );
+    ensure!(
+        record.schema_version != 2
+            || (record.plan.schema_version == 1
+                && record.modify_snapshot.is_none()
+                && record.absent_resources.is_empty()),
+        "legacy recovery cannot carry component transaction state"
+    );
     record.plan.validate(request.manifest)?;
+    record.receipt.validate_manifest(request.manifest)?;
+    ensure!(
+        record.receipt.files
+            == avelin_core::resolve_selection(request.manifest, &record.plan.selected_components)?
+                .files,
+        "recovery receipt differs from the frozen component selection"
+    );
     ensure!(
         record.plan.user_sid == request.user_sid
             && key(&record.plan.install_dir) == key(request.target)
@@ -386,10 +550,8 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
         "recovery identity mismatch"
     );
     ensure!(
-        record.receipt.schema_version == avelin_core::SCHEMA_VERSION
-            && record.receipt.app_id == request.manifest.app_id
+        record.receipt.app_id == request.manifest.app_id
             && record.receipt.app_version == request.manifest.app_version
-            && record.receipt.files == request.manifest.files
             && record.receipt.manifest_sha256 == record.plan.manifest_sha256
             && record.receipt.user_sid == request.user_sid
             && key(Path::new(&record.receipt.install_dir)) == key(request.target),
@@ -402,6 +564,11 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
     ] {
         avelin_core::safe_id(id)?;
     }
+    ensure!(
+        record.plan.operation == Operation::Uninstall
+            || record.receipt.task_id == record.plan.task_id,
+        "recovery receipt belongs to another task"
+    );
     let expected_after = system::registration_expected(
         (record.plan.operation != Operation::Uninstall)
             .then(|| system::Registration::new(request.manifest, request.target))
@@ -433,6 +600,62 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
                 "recovery upgrade receipt lost previous installation identity"
             );
             system::registration_expected(Some(&system::Registration::new(old, request.target)))
+        }
+        Operation::Modify => {
+            let previous = read(&request.session.join("previous-receipt.json"))?;
+            let receipt: Receipt = serde_json::from_slice(&previous)?;
+            record
+                .plan
+                .validate_modify(request.manifest, &receipt, &hash_bytes(&previous))?;
+            ensure!(
+                record.receipt.installation_id == receipt.installation_id
+                    && record.receipt.previous_commit_id.as_deref()
+                        == Some(receipt.commit_id.as_str()),
+                "component recovery lost previous installation identity"
+            );
+            let snapshot = crate::modify::load_snapshot(&record.plan, &receipt, request.session)?;
+            ensure!(
+                record.modify_snapshot.as_ref() == Some(&snapshot),
+                "component recovery snapshot differs from frozen plan"
+            );
+            let (removed, preserved, absent) =
+                crate::modify::classify(&snapshot, &receipt, &record.receipt, request.target)?;
+            ensure!(
+                record.absent_resources == absent,
+                "component recovery missing-state snapshot changed"
+            );
+            for item in removed {
+                ensure!(
+                    record
+                        .backup
+                        .iter()
+                        .any(|b| key(&b.resource.path) == key(&item.path)
+                            && b.resource.sha256 == item.sha256
+                            && b.resource.size == item.size),
+                    "component recovery removed-file backup missing"
+                );
+            }
+            for item in preserved {
+                ensure!(
+                    record
+                        .preserved
+                        .iter()
+                        .any(|p| key(&p.path) == key(&item.path)
+                            && p.sha256 == item.sha256
+                            && p.size == item.size),
+                    "component recovery untouched-file snapshot missing"
+                );
+            }
+            ensure!(
+                record.backup.iter().any(|b| key(&b.resource.path)
+                    == key(&request.target.join(RECEIPT_NAME))
+                    && b.resource.sha256 == hash_bytes(&previous)),
+                "component recovery original receipt backup missing"
+            );
+            system::registration_expected(Some(&system::Registration::new(
+                request.manifest,
+                request.target,
+            )))
         }
         Operation::Repair => {
             let previous = read(&request.session.join("prior-receipt.json"))?;
@@ -766,8 +989,23 @@ fn check_disk(loaded: &Loaded) -> Result<()> {
             );
         }
     }
+    confirm_untouched(record)?;
+    Ok(())
+}
+fn confirm_untouched(record: &RecoveryRecord) -> Result<()> {
     for item in &record.preserved {
         confirm(&item.path, &item.sha256)?;
+        ensure!(
+            fs::metadata(&item.path)?.len() == item.size,
+            "preserved resource size changed"
+        );
+    }
+    for path in &record.absent_resources {
+        avelin_core::reject_reparse(path)?;
+        ensure!(
+            !path.try_exists()?,
+            "missing component resource appeared during recovery"
+        );
     }
     Ok(())
 }
@@ -913,9 +1151,7 @@ pub(crate) fn recover(
             }
         }
     }
-    for item in &loaded.record.preserved {
-        confirm(&item.path, &item.sha256)?;
-    }
+    confirm_untouched(&loaded.record)?;
     let expected = if loaded.committed {
         &loaded.record.next_registration
     } else {

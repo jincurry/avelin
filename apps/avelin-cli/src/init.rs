@@ -24,6 +24,16 @@ struct Config<'a> {
     app: App<'a>,
     payload: Payload<'a>,
     install: Install<'a>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    components: Vec<InitialComponent>,
+}
+#[derive(Serialize)]
+struct InitialComponent {
+    id: String,
+    required: bool,
+    name: std::collections::BTreeMap<String, String>,
+    description: std::collections::BTreeMap<String, String>,
+    paths: Vec<String>,
 }
 #[derive(Serialize)]
 struct App<'a> {
@@ -172,7 +182,7 @@ pub fn create(options: Options) -> Result<Value> {
     };
     let entry = relative_path(&options.entry)
         .context("--entry must be a safe relative payload filename")?;
-    let config = Config {
+    let mut config = Config {
         schema_version: SCHEMA_VERSION,
         app: App {
             id: &options.app_id,
@@ -188,11 +198,35 @@ pub fn create(options: Options) -> Result<Value> {
             desktop_shortcut: false,
             start_menu_shortcut: true,
         },
+        components: vec![],
     };
     // A serializer quotes user text as data; no TOML interpolation or templates.
     let toml = toml::to_string_pretty(&config).context("serialize configuration as TOML")?;
     let (_, manifest) = crate::config::load_text(&directory, &toml)
         .context("init input is invalid; no configuration file was written")?;
+    // Start with one explicit core group; developers can move paths into optional
+    // groups later without changing the payload directory or copying any files.
+    config.schema_version = avelin_core::CONFIG_SCHEMA_VERSION;
+    let core = avelin_core::ComponentDefinition::core();
+    config.components.push(InitialComponent {
+        id: core.id,
+        required: true,
+        name: core.name,
+        description: core.description,
+        paths: manifest
+            .files
+            .iter()
+            .map(|file| match file.path.split_once('\\') {
+                Some((directory, _)) => format!("{directory}/"),
+                None => file.path.clone(),
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+    });
+    let toml = toml::to_string_pretty(&config).context("serialize component configuration")?;
+    crate::config::load_text(&directory, &toml)
+        .context("validate generated component configuration")?;
     let _output_pins = pin_directories(&directory, true)?;
     create_config(&config_path, toml.as_bytes())?;
     Ok(json!({

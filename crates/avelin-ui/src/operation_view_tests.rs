@@ -10,7 +10,7 @@ use gpui_kit::{AppContext, TestAppContext};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 
-fn connected(
+pub(super) fn connected(
     cx: &mut TestAppContext,
     options: UiOptions,
 ) -> (
@@ -69,6 +69,9 @@ fn connected_install_submits_the_actual_shortcut_choices(cx: &mut TestAppContext
             install_dir: PathBuf::from("C:\\Chosen App"),
             desktop_shortcut: true,
             start_menu_shortcut: false,
+            selected_components: None,
+            operation: Some(Operation::Install),
+            migration_confirmed: false,
         }
     );
     assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
@@ -111,6 +114,9 @@ fn uninstall_uses_fixed_path_and_never_sends_cancel(cx: &mut TestAppContext) {
             install_dir: PathBuf::from("C:\\Installed App"),
             desktop_shortcut: false,
             start_menu_shortcut: false,
+            selected_components: None,
+            operation: Some(Operation::Uninstall),
+            migration_confirmed: false,
         }
     );
     assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
@@ -319,7 +325,10 @@ fn upgrade_confirmation_keeps_the_installed_path_and_actual_choices(cx: &mut Tes
         UiCommand::Start {
             install_dir: PathBuf::from("C:\\Installed Cedar"),
             desktop_shortcut: true,
-            start_menu_shortcut: false
+            start_menu_shortcut: false,
+            selected_components: None,
+            operation: Some(Operation::Upgrade),
+            migration_confirmed: false,
         }
     );
     fixture.update(cx, |view, _, cx| {
@@ -483,6 +492,9 @@ fn maintenance_requires_consent_keeps_the_path_and_hides_install_choices(cx: &mu
                 install_dir: PathBuf::from("C:\\Existing Product"),
                 desktop_shortcut: false,
                 start_menu_shortcut: false,
+                selected_components: None,
+                operation: Some(operation),
+                migration_confirmed: false,
             }
         );
         fixture.update(cx, |view, _, cx| {

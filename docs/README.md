@@ -7,12 +7,12 @@
 | [接入指南](getting-started.md) | 用发布目录、TOML 和品牌资源生成 Rust Setup |
 | [CLI 参数](cli.md) | init/check/build、组件定位、诊断与覆盖保护 |
 | [兼容约定](compatibility.md) | 支持范围、升级、卸载、退出码与恢复边界 |
-| [恢复与修复](maintenance.md) | 中断恢复、同版本修复、冲突保留与备份 |
+| [恢复、修复与组件更改](maintenance.md) | 中断恢复、同版本维护、冲突保留与备份 |
 | [开发指南](development.md) | 从新克隆准备环境、检查、构建与 CI |
 | [架构](architecture.md) | 代码职责、执行路径与状态模型 |
 | [模型与协议](schemas/README.md) | 本地 JSON Schema 与样例 |
 | [路线图](roadmap.md) | 当前能力和后续方向 |
-| [可选组件提案](optional-components.md) | 尚未实现：选装、升级保持选择、同版本增删与兼容策略 |
+| [可选组件](optional-components.md) | 当前源码：清单选装、打包配置、升级继承与同版本增删；已发布旧工具包不含此能力 |
 | [第三方材料](third-party.md) | 依赖许可、来源及材料生成 |
 | [维护与发布](releasing.md) | 源码提交检查与二进制交付边界 |
 

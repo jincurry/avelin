@@ -108,7 +108,10 @@ Require ($build.sample.payload.path -ceq 'sample/payload/nimbus-demo.exe') 'Inva
 foreach ($path in @('sample/payload/nimbus-demo.exe','sample/Nimbus-Rust-Setup.exe','sample/Nimbus-Rust-Setup.backend.exe')) { PeX64 (Child $KitDirectory $path) }
 Require ($build.sample.app_id -ceq 'dev.avelin.native.sample' -and $build.sample.version -ceq '1.0.0' -and $build.sample.config -ceq 'sample/avelin.toml' -and $build.sample.setup -ceq 'sample/Nimbus-Rust-Setup.exe') 'Invalid sample contract.'
 $sample=Json (Child $KitDirectory 'sample/Nimbus-Rust-Setup.manifest.json')
-Require ($sample.schema_version -eq 1 -and $sample.app_id -ceq $build.sample.app_id -and $sample.app_version -ceq $build.sample.version -and $sample.entry -ceq 'nimbus-demo.exe') 'Sample manifest differs.'
+Require ($sample.schema_version -in @(1, 2) -and $sample.app_id -ceq $build.sample.app_id -and $sample.app_version -ceq $build.sample.version -and $sample.entry -ceq 'nimbus-demo.exe') 'Sample manifest differs.'
+if ($sample.schema_version -eq 2) {
+    Require (@($sample.components).Count -eq 1 -and $sample.components[0].id -ceq 'core' -and $sample.components[0].required -eq $true -and @($sample.files | Where-Object { $_.component_id -cne 'core' }).Count -eq 0) 'Default sample must contain only its required core component.'
+}
 Require ($sample.runtime_sha256 -ceq $records['bin/avelin-app.exe'].sha256) 'Sample runtime differs from the kit runtime.'
 foreach ($name in @('desktop_shortcut','start_menu_shortcut')) {
     $property=$sample.PSObject.Properties[$name]

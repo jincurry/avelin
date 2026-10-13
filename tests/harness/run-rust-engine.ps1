@@ -302,8 +302,9 @@ function VerifyInstalled([object]$Package, [object]$Report, [string]$Label, [str
     foreach ($record in $registration) {
         $v = $record.values
         $normal = '"{0}" --gui --operation uninstall --backend "{1}" --manifest "{2}" --install-dir "{3}"' -f $resident, $uninstaller, $manifest, $script:InstallRoot
-        Require ($v.UninstallString -ceq $normal -and $v.QuietUninstallString -ceq $normal.Replace(' --gui ', ' --silent ') -and $v.DisplayVersion -ceq $Package.manifest.app_version -and $v.DisplayName -ceq $Package.manifest.app_name -and (SamePath $v.InstallLocation $script:InstallRoot) -and $v.NoModify -eq 1 -and $v.NoRepair -eq 1) 'Registered commands/identity/capabilities differ'
-        foreach ($name in @('UninstallString', 'QuietUninstallString', 'DisplayName', 'DisplayVersion', 'InstallLocation')) { Require ($record.kinds[$name] -ceq 'String') "Registration type differs: $name" }
+        $modify = '"{0}" --gui --maintenance --install-dir "{1}"' -f $resident, $script:InstallRoot
+        Require ($v.UninstallString -ceq $normal -and $v.QuietUninstallString -ceq $normal.Replace(' --gui ', ' --silent ') -and $v.ModifyPath -ceq $modify -and $v.DisplayVersion -ceq $Package.manifest.app_version -and $v.DisplayName -ceq $Package.manifest.app_name -and (SamePath $v.InstallLocation $script:InstallRoot) -and $v.NoModify -eq 0 -and $v.NoRepair -eq 1) 'Registered commands/identity/capabilities differ'
+        foreach ($name in @('UninstallString', 'QuietUninstallString', 'ModifyPath', 'DisplayName', 'DisplayVersion', 'InstallLocation')) { Require ($record.kinds[$name] -ceq 'String') "Registration type differs: $name" }
         foreach ($name in @('NoModify', 'NoRepair')) { Require ($record.kinds[$name] -ceq 'DWord') "Registration type differs: $name" }
     }
     CopyNew $receiptPath (Join-Path $script:RunRoot "$Label.receipt.json")

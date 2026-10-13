@@ -25,6 +25,7 @@ pub(crate) struct UiState {
     operation: Operation,
     responses_open: bool,
     launch_status: LaunchStatus,
+    preflight_blocked: Option<String>,
 }
 
 impl UiState {
@@ -43,6 +44,7 @@ impl UiState {
             operation,
             responses_open: connected,
             launch_status: LaunchStatus::Idle,
+            preflight_blocked: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl UiState {
             return false;
         }
         self.operation = operation;
+        self.clear_preflight_blocked();
         true
     }
 
@@ -87,6 +90,7 @@ impl UiState {
             return false;
         }
         self.start_requested = true;
+        self.clear_preflight_blocked();
         if !self.connected {
             self.snapshot = UiSnapshot {
                 phase: UiPhase::Preparing,
@@ -130,16 +134,39 @@ impl UiState {
     }
 
     pub(crate) fn receive_response(&mut self, response: UiResponse) -> bool {
-        if self.launch_status != LaunchStatus::Pending {
+        match response {
+            UiResponse::PreflightBlocked { detail } => self.reject_start(detail),
+            UiResponse::LaunchResult { succeeded, detail } => {
+                if self.launch_status != LaunchStatus::Pending {
+                    return false;
+                }
+                self.launch_status = if succeeded {
+                    LaunchStatus::Succeeded
+                } else {
+                    LaunchStatus::Failed(detail)
+                };
+                true
+            }
+        }
+    }
+
+    /// Only a pending local Start may be rejected. A host snapshot, including
+    /// Preparing, means execution has begun and must never become retryable here.
+    fn reject_start(&mut self, detail: String) -> bool {
+        if !self.connected || !self.responses_open || self.disconnected || !self.awaiting_start() {
             return false;
         }
-        let UiResponse::LaunchResult { succeeded, detail } = response;
-        self.launch_status = if succeeded {
-            LaunchStatus::Succeeded
-        } else {
-            LaunchStatus::Failed(detail)
-        };
+        self.start_requested = false;
+        self.preflight_blocked = Some(detail);
         true
+    }
+
+    pub(crate) fn preflight_blocked(&self) -> Option<&str> {
+        self.preflight_blocked.as_deref()
+    }
+
+    pub(crate) fn clear_preflight_blocked(&mut self) {
+        self.preflight_blocked = None;
     }
 
     pub(crate) fn close_responses(&mut self) -> bool {
@@ -180,6 +207,7 @@ impl UiState {
             return false;
         }
         self.snapshot = snapshot;
+        self.clear_preflight_blocked();
         true
     }
 
@@ -190,6 +218,7 @@ impl UiState {
             return false;
         }
         self.disconnected = true;
+        self.clear_preflight_blocked();
         if self.snapshot.phase.is_terminal() {
             return false;
         }
@@ -305,6 +334,66 @@ mod tests {
             completed: 21,
             total: Some(100),
             detail: format!("reported {phase:?}"),
+        }
+    }
+
+    #[test]
+    fn preflight_rejection_enables_one_fresh_start_without_a_task_result() {
+        let mut state = UiState::new(true);
+        let blocked = || UiResponse::PreflightBlocked {
+            detail: "Example (PID 42)".into(),
+        };
+        assert!(!state.receive_response(blocked()));
+        assert!(state.request_start(true));
+        assert!(state.receive_response(blocked()));
+        assert_eq!(state.phase(), UiPhase::Ready);
+        assert!(state.may_close());
+        assert_eq!(state.preflight_blocked(), Some("Example (PID 42)"));
+        assert!(!state.receive_response(blocked()));
+        assert!(!state.request_start(false));
+        assert!(state.request_start(true));
+        assert!(state.preflight_blocked().is_none());
+        assert!(!state.request_start(true));
+        assert!(state.receive_response(blocked()));
+        state.clear_preflight_blocked();
+        assert!(state.preflight_blocked().is_none());
+    }
+
+    #[test]
+    fn preflight_feedback_cannot_replay_running_terminal_cancelled_or_disconnected_tasks() {
+        for phase in [
+            UiPhase::Preparing,
+            UiPhase::Installing,
+            UiPhase::Finalizing,
+            UiPhase::Cancelling,
+            UiPhase::Succeeded,
+            UiPhase::Failed,
+            UiPhase::Cancelled,
+            UiPhase::Unknown,
+        ] {
+            let mut state = UiState::new(true);
+            assert!(state.request_start(true));
+            state.receive(snapshot(phase));
+            let confirmed = state.snapshot().clone();
+            assert!(!state.receive_response(UiResponse::PreflightBlocked {
+                detail: "stale".into()
+            }));
+            assert_eq!(state.snapshot(), &confirmed);
+            assert!(!state.request_start(true));
+            assert!(state.preflight_blocked().is_none());
+        }
+        for disconnect in [false, true] {
+            let mut state = UiState::new(true);
+            state.request_start(true);
+            if disconnect {
+                state.disconnect("lost host");
+            } else {
+                state.request_cancel();
+            }
+            assert!(!state.receive_response(UiResponse::PreflightBlocked {
+                detail: "stale".into()
+            }));
+            assert!(!state.request_start(true));
         }
     }
 

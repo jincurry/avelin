@@ -72,11 +72,19 @@ impl<'de> Deserialize<'de> for TaskCommand {
     }
 }
 
-/// Responses to post-install actions are independent of the confirmed task result.
+/// Host action feedback independent of the confirmed task result.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "response", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskResponse {
-    LaunchResult { succeeded: bool, detail: String },
+    LaunchResult {
+        succeeded: bool,
+        detail: String,
+    },
+    /// No worker or transaction has started. The host remains ready to check a
+    /// new Start request after the user resolves the reported file usage.
+    PreflightBlocked {
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -402,6 +410,29 @@ pub fn replay_backend_events(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn preflight_blocked_is_feedback_not_a_terminal_and_rejects_extra_fields() {
+        let response = TaskResponse::PreflightBlocked {
+            detail: "Example (PID 42): bin/example.exe".into(),
+        };
+        let value = json!({
+            "response":"preflight_blocked", "detail":"Example (PID 42): bin/example.exe"
+        });
+        assert_eq!(serde_json::to_value(&response).unwrap(), value);
+        assert_eq!(
+            serde_json::from_value::<TaskResponse>(value.clone()).unwrap(),
+            response
+        );
+        for invalid in [
+            json!({"response":"preflight_blocked"}),
+            json!({"response":"preflight_blocked","detail":false}),
+            json!({"response":"preflight_blocked","detail":"","succeeded":false}),
+        ] {
+            assert!(serde_json::from_value::<TaskResponse>(invalid).is_err());
+        }
+        assert!(serde_json::from_value::<TaskSnapshot>(value).is_err());
+    }
 
     #[test]
     fn launch_action_and_response_are_separate_from_unchanged_task_snapshots() {

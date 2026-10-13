@@ -87,6 +87,7 @@ impl InstallerView {
         component.selected = selected;
         self.accepted = false;
         self.migration_confirmed = false;
+        self.state.clear_preflight_blocked();
         cx.notify();
     }
 
@@ -243,6 +244,7 @@ impl InstallerView {
                     if view.phase() == UiPhase::Ready {
                         view.migration_confirmed = *checked;
                         view.accepted = false;
+                        view.state.clear_preflight_blocked();
                         cx.notify();
                     }
                 }))))

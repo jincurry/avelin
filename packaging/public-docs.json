@@ -12,6 +12,7 @@
     "releasing.md",
     "maintenance.md",
     "optional-components.md",
+    "windows-maintenance.md",
     "schemas/README.md",
     "schemas/examples/command.json",
     "schemas/examples/components-command.json",

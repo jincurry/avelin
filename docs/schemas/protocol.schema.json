@@ -276,25 +276,28 @@
       ]
     },
     "TaskResponse": {
-      "description": "Independent post-install action feedback; never replaces the confirmed TaskSnapshot terminal result.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "response",
-        "succeeded",
-        "detail"
-      ],
-      "properties": {
-        "response": {
-          "const": "launch_result"
+      "description": "Host action feedback. preflight_blocked rejects only a pending Start before the first host snapshot or worker transaction; it permits a fresh explicit Start after file usage is resolved. Neither response replaces or resets a confirmed TaskSnapshot result.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["response", "succeeded", "detail"],
+          "properties": {
+            "response": { "const": "launch_result" },
+            "succeeded": { "type": "boolean" },
+            "detail": { "type": "string" }
+          }
         },
-        "succeeded": {
-          "type": "boolean"
-        },
-        "detail": {
-          "type": "string"
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["response", "detail"],
+          "properties": {
+            "response": { "const": "preflight_blocked" },
+            "detail": { "type": "string" }
+          }
         }
-      }
+      ]
     }
   }
 }

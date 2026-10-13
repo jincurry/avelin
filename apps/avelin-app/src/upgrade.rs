@@ -19,6 +19,8 @@ pub struct Registration {
     pub install_location: String,
     pub uninstall_string: String,
     pub quiet_uninstall_string: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modify_path: Option<String>,
     pub no_modify: u32,
     pub no_repair: u32,
 }
@@ -110,6 +112,28 @@ fn registry_value(key: &Key, name: &str) -> Result<(u32, Vec<u8>)> {
     Ok((kind, bytes))
 }
 
+fn optional_registry_string(key: &Key, name: &str) -> Result<Option<String>> {
+    let mut size = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            wide(name).as_ptr(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut size,
+        )
+    };
+    if status == 2 {
+        return Ok(None);
+    }
+    ensure!(
+        status == 0,
+        "cannot inspect installed registration {name} ({status})"
+    );
+    registry_string(key, name).map(Some)
+}
+
 fn registry_string(key: &Key, name: &str) -> Result<String> {
     let (kind, bytes) = registry_value(key, name)?;
     ensure!(
@@ -170,6 +194,7 @@ pub fn registration(app_id: &str) -> Result<Option<Registration>> {
         install_location: registry_string(&key, "InstallLocation")?,
         uninstall_string: registry_string(&key, "UninstallString")?,
         quiet_uninstall_string: registry_string(&key, "QuietUninstallString")?,
+        modify_path: optional_registry_string(&key, "ModifyPath")?,
         no_modify: registry_dword(&key, "NoModify")?,
         no_repair: registry_dword(&key, "NoRepair")?,
     }))
@@ -204,6 +229,14 @@ fn command(target: &Path, silent: bool) -> String {
     )
 }
 
+fn maintenance_command(target: &Path) -> String {
+    format!(
+        "\"{}\" --gui --maintenance --install-dir \"{}\"",
+        target.join(".avelin").join("avelin-app.exe").display(),
+        target.display()
+    )
+}
+
 pub fn verify_registration(value: &Registration, manifest: &Manifest, target: &Path) -> Result<()> {
     ensure!(
         resources::same_path(Path::new(&value.install_location), target)
@@ -211,7 +244,9 @@ pub fn verify_registration(value: &Registration, manifest: &Manifest, target: &P
             && value.display_version == manifest.app_version
             && value.uninstall_string == command(target, false)
             && value.quiet_uninstall_string == command(target, true)
-            && value.no_modify == 1
+            && ((value.no_modify == 1 && value.modify_path.is_none())
+                || (value.no_modify == 0
+                    && value.modify_path.as_deref() == Some(maintenance_command(target).as_str())))
             && value.no_repair == 1,
         "installation registration does not match the recorded product, version, directory or uninstall commands"
     );
@@ -693,5 +728,32 @@ mod tests {
             r#""C:\Apps\Nimbus 笔记\.avelin\avelin-app.exe" --gui --operation uninstall --backend "C:\Apps\Nimbus 笔记\uninstall.exe" --manifest "C:\Apps\Nimbus 笔记\.avelin\manifest.json" --install-dir "C:\Apps\Nimbus 笔记""#
         );
         assert!(command(target, true).contains(" --silent --operation uninstall "));
+    }
+
+    #[test]
+    fn maintenance_registration_requires_the_exact_command_or_complete_legacy_shape() {
+        let manifest: Manifest =
+            serde_json::from_str(include_str!("../../../docs/schemas/examples/manifest.json"))
+                .unwrap();
+        let target = Path::new(r"C:\Apps\示例应用");
+        let mut value = Registration {
+            display_name: manifest.app_name.clone(),
+            display_version: manifest.app_version.clone(),
+            install_location: target.to_string_lossy().into_owned(),
+            uninstall_string: command(target, false),
+            quiet_uninstall_string: command(target, true),
+            modify_path: Some(maintenance_command(target)),
+            no_modify: 0,
+            no_repair: 1,
+        };
+        verify_registration(&value, &manifest, target).unwrap();
+        value.modify_path = None;
+        assert!(verify_registration(&value, &manifest, target).is_err());
+        value.no_modify = 1;
+        verify_registration(&value, &manifest, target).unwrap();
+        value.modify_path = Some("unrelated.exe --maintenance".into());
+        assert!(verify_registration(&value, &manifest, target).is_err());
+        value.modify_path = Some(maintenance_command(target));
+        assert!(verify_registration(&value, &manifest, target).is_err());
     }
 }

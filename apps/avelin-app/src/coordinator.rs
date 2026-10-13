@@ -62,6 +62,9 @@ pub struct Args {
     pub report: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "install")]
     pub operation: Operation,
+    /// Open maintenance using the verified, installed offline package.
+    #[arg(long)]
+    pub maintenance: bool,
     /// Complete final component IDs, for example core,tools. Defaults apply only to first install.
     #[arg(long)]
     pub components: Option<String>,
@@ -349,6 +352,7 @@ impl Drop for BackendGuard {
 pub fn requests_gui(args: &Args) -> bool {
     !args.silent
         && (args.gui
+            || args.maintenance
             || args.ui_demo
             || (cfg!(feature = "gui")
                 && (matches!(
@@ -361,6 +365,33 @@ pub fn requests_gui(args: &Args) -> bool {
 }
 
 fn validate_launch(args: &Args) -> Result<()> {
+    if args.maintenance {
+        ensure!(
+            args.install_dir.is_some()
+                && args.backend.is_none()
+                && args.manifest.is_none()
+                && !args.ui_demo
+                && matches!(
+                    args.operation,
+                    Operation::Install | Operation::Repair | Operation::Modify | Operation::Recover
+                ),
+            "--maintenance requires --install-dir and uses only the installed package; install/repair/modify/recover modes only"
+        );
+        ensure!(
+            !args.silent || args.operation != Operation::Install,
+            "silent --maintenance requires an explicit repair, modify or recover operation"
+        );
+        ensure!(
+            args.engine_fault.is_none()
+                && args.engine_pause.is_none()
+                && args.cancel_after_files.is_none()
+                && args.cancel_after_ms.is_none()
+                && args.fault_after_files.is_none()
+                && args.desktop_shortcut.is_none()
+                && args.start_menu_shortcut.is_none(),
+            "installed maintenance does not accept fault injection or installation option overrides"
+        );
+    }
     ensure!(
         args.components.is_none()
             || matches!(
@@ -515,6 +546,9 @@ pub fn entry(mut args: Args) -> Result<i32> {
     validate_launch(&args)?;
     if let Some(pid) = args.wait_for_pid {
         wait_for_parent(pid)?;
+    }
+    if args.maintenance {
+        return launch_installed_maintenance(&args);
     }
     if args.operation == Operation::Uninstall {
         if let Some(root) = &args.install_dir {
@@ -710,7 +744,7 @@ pub fn entry(mut args: Args) -> Result<i32> {
             }
             args.install_dir = Some(discovered_target.clone());
             if matches!(args.operation, Operation::Repair | Operation::Modify) {
-                let repair = crate::maintenance::repair_inputs(
+                let repair = crate::maintenance::repair_preview(
                     &manifest,
                     &discovered_target,
                     &transport::current_user_sid()?,
@@ -797,7 +831,85 @@ pub fn entry(mut args: Args) -> Result<i32> {
             "this runtime was built without GUI; use the documented CLI flags or build --features gui"
         );
     }
+    let (backend, usage) = crate::preflight::inspect_with_backend(&args, &manifest, backend)?;
+    if !usage.is_clear() {
+        return crate::preflight::save_blocked(&args, &usage, args.english);
+    }
     run(args, backend, manifest, None)
+}
+
+fn launch_installed_maintenance(args: &Args) -> Result<i32> {
+    use std::os::windows::process::CommandExt;
+    let root = std::path::absolute(
+        args.install_dir
+            .as_ref()
+            .context("maintenance directory required")?,
+    )?;
+    let resident = resources::same_path(
+        &std::env::current_exe()?,
+        &root.join(".avelin/avelin-app.exe"),
+    );
+    ensure!(
+        !resident || !args.silent,
+        "silent installed maintenance must be launched from an external runtime so its exit code can report the completed task; use the GUI for the resident maintenance entry"
+    );
+    let prepared = crate::installed_maintenance::prepare(&root, &transport::current_user_sid()?)?;
+    let detach = requests_gui(args) || resident;
+    let operation: avelin_core::Operation = args.operation.into();
+    let mut command = Command::new(prepared.runtime.path());
+    command
+        .args([
+            "--operation",
+            serde_json::to_value(operation)?
+                .as_str()
+                .context("operation name")?,
+        ])
+        .arg("--backend")
+        .arg(prepared.backend.path())
+        .arg("--manifest")
+        .arg(prepared.manifest.path())
+        .arg("--install-dir")
+        .arg(&root)
+        .arg("--observation-timeout-secs")
+        .arg(args.observation_timeout_secs.to_string())
+        .current_dir(prepared.directory.path())
+        .env("TEMP", prepared.directory.path())
+        .env("TMP", prepared.directory.path())
+        .creation_flags(0x08000000);
+    command.arg(if args.silent { "--silent" } else { "--gui" });
+    if detach {
+        command
+            .arg("--wait-for-pid")
+            .arg(std::process::id().to_string());
+    }
+    if args.english {
+        command.arg("--english");
+    }
+    if args.repair_overwrite {
+        command.arg("--repair-overwrite");
+    }
+    if args.recovery_apply {
+        command.arg("--recovery-apply");
+    }
+    if let Some(value) = &args.components {
+        command.arg("--components").arg(value);
+    }
+    if let Some(value) = &args.recovery_session {
+        command
+            .arg("--recovery-session")
+            .arg(std::path::absolute(value)?);
+    }
+    if let Some(value) = &args.report {
+        command.arg("--report").arg(std::path::absolute(value)?);
+    }
+    let mut child = command
+        .spawn()
+        .context("could not start verified installed maintenance")?;
+    if detach {
+        Ok(0)
+    } else {
+        Ok(child.wait()?.code().unwrap_or(4))
+    }
 }
 
 #[derive(Clone)]
@@ -2527,7 +2639,22 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
             match cmd {
                 UiCommand::Cancel => {
                     if args.operation == Operation::Install {
-                        dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed)
+                        dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Cancellation may arrive immediately after a blocked
+                        // preflight response. There is no worker to acknowledge
+                        // it in that case, so complete it here, exactly once.
+                        if backend.is_some() && worker.is_none() && task_code.is_none() {
+                            started = true;
+                            task_code = Some(2);
+                            let _ = sender.send(avelin_core::TaskSnapshot::finished(
+                                TaskResult::Cancelled,
+                                if args.english {
+                                    "Cancelled before starting; no installation changes were made."
+                                } else {
+                                    "已在开始前取消，未修改安装内容。"
+                                },
+                            ));
+                        }
                     }
                 }
                 UiCommand::LaunchInstalled => {
@@ -2616,6 +2743,57 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                         // This command arrives only after the recovery page's
                         // explicit confirmation. Silent checks never take it.
                         args.recovery_apply = true;
+                    }
+                    // No worker, task journal or target mutation exists at this point.
+                    // Only this pre-start response may return the UI to confirmation.
+                    let inspection = crate::preflight::inspect_with_backend(
+                        &args,
+                        &manifest,
+                        backend.take().expect("backend available before start"),
+                    )
+                    .map(|(pin, usage)| {
+                        backend = Some(pin);
+                        usage
+                    });
+                    for queued in receiver.try_iter() {
+                        if matches!(queued, UiCommand::Cancel)
+                            && args.operation == Operation::Install
+                        {
+                            dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    if dispatcher_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    if dispatcher_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        task_code = Some(2);
+                        let _ = sender.send(avelin_core::TaskSnapshot::finished(
+                            TaskResult::Cancelled,
+                            if args.english {
+                                "Cancelled before starting; no installation changes were made."
+                            } else {
+                                "已在开始前取消，未修改安装内容。"
+                            },
+                        ));
+                        continue;
+                    }
+                    match inspection {
+                        Ok(usage) if !usage.is_clear() => {
+                            started = false;
+                            let _ = response_sender.send(TaskResponse::PreflightBlocked {
+                                detail: crate::preflight::detail(&usage, args.english),
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            task_code = Some(3);
+                            let _ = sender.send(avelin_core::TaskSnapshot::finished(
+                                TaskResult::Failed,
+                                format!("AVELIN_TASK_NOT_STARTED\n{error:#}"),
+                            ));
+                            continue;
+                        }
+                        Ok(_) => {}
                     }
                     // A retained dispatcher clone would prevent removal of the installed uninstaller.
                     let backend = backend.take().expect("one backend per task");
@@ -2760,6 +2938,35 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_maintenance_rejects_external_inputs_and_ambiguous_silent_launch() {
+        for tail in [
+            vec!["--silent"],
+            vec![
+                "--gui",
+                "--backend",
+                "other.exe",
+                "--manifest",
+                "other.json",
+            ],
+            vec!["--silent", "--operation", "uninstall"],
+            vec!["--gui", "--engine-fault", "rollback"],
+        ] {
+            let mut argv = vec!["avelin", "--maintenance", "--install-dir", r"C:\Example"];
+            argv.extend(tail);
+            let args = Args::try_parse_from(argv).unwrap();
+            assert!(validate_launch(&args).is_err());
+        }
+        for tail in [
+            vec!["--silent", "--operation", "repair"],
+            vec!["--silent", "--operation", "modify", "--components", "core"],
+            vec!["--silent", "--operation", "recover"],
+        ] {
+            let mut argv = vec!["avelin", "--maintenance", "--install-dir", r"C:\Example"];
+            argv.extend(tail);
+            validate_launch(&Args::try_parse_from(argv).unwrap()).unwrap();
+        }
+    }
 
     #[test]
     fn entry_rejects_non_rust_workers_before_creating_installation_state() {

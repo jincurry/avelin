@@ -132,6 +132,20 @@ pwsh -NoProfile -File tests/harness/run-rust-maintenance.ps1 `
 
 开发验收的隐藏参数 `--engine-fault` 支持 `after-staging`、`before-registration`、`after-registration`、`before-commit`、`after-commit`、`rollback`；`--engine-pause` 提供 `prepared`、`after-first-publish`、`after-first-remove`、`after-commit`、`recovery-after-first-mutation` 的有界暂停点，供测试在核验准确 PID 后观察或注入异常退出。它们只用于实际 Rust 事务测试，不是接入方的安装选项或恢复命令。不要用终止进程代替正常取消。
 
+Windows 系统维护入口与占用提示另有 13 项真实进程验收。它检查应用登记、原 Setup 移走后的修复/组件更改、真实文件句柄阻塞与释放后重试，以及已安装资料完整时的恢复入口：
+
+```powershell
+$windowsMaintenanceRoot = Join-Path $PWD ('target/windows-maintenance/' + [Guid]::NewGuid().ToString('N'))
+pwsh -NoProfile -File tests/harness/run-windows-maintenance-entry.ps1 `
+  -Runtime ./target/release/avelin-app.exe `
+  -Cli ./target/release/avelin-cli.exe `
+  -RustWorker ./target/release/avelin-engine.exe `
+  -Sample ./target/release/nimbus-demo.exe `
+  -OutputRoot $windowsMaintenanceRoot
+```
+
+占用者是测试自己启动的子进程，通过释放标记正常退出。脚本确认被阻止时尚未创建执行任务、未改变受管内容或登记，不关闭用户应用。它不打开 Windows 设置或原生安装器窗口；界面状态由 headless UI 测试验证，真实桌面视觉与朗读另行确认。
+
 ### 结果记录
 
 可选组件使用独立的真实进程脚本，覆盖默认/显式安装、更改、升级继承、冲突保护与中断恢复，共 29 项：
@@ -187,7 +201,7 @@ GitHub 官方将 `windows-2025` 列为 Windows x64 hosted runner 标签；实际
 
 ### 维护者完整工具包验收
 
-`scripts/ci-rust-windows.ps1` 检查源码、构建 Release、收集依赖材料、生成工具包、解压校验，再使用解压组件运行生命周期、中断、恢复/修复及可选组件场景。
+`scripts/ci-rust-windows.ps1` 检查源码、构建 Release、收集依赖材料、生成工具包、解压校验，再使用解压组件运行生命周期、中断、恢复/修复、可选组件及 Windows 维护入口/占用重试场景。
 
 ```powershell
 pwsh -NoProfile -File scripts/ci-rust-windows.ps1 `

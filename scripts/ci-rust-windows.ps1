@@ -5,8 +5,8 @@ Build, package and validate the Rust engine on a provisioned Windows host.
 .DESCRIPTION
 Uses installed tools only; never installs Rust, targets, Python or SDKs.
 Cargo may fetch dependencies selected by Cargo.lock. Builds current components,
-packages and extracts a Rust devkit, then runs all 17 lifecycle, 6 interruption and
-17 maintenance cases against those extracted binaries.
+packages and extracts a Rust devkit, then runs lifecycle, interruption, maintenance,
+optional-component and Windows maintenance-entry cases against extracted binaries.
 OutputDirectory must be a new directory under this repository's target tree.
 Interrupted scenes, user-scoped test registrations and private evidence remain
 available for inspection; this entry never recursively deletes them. Interruption
@@ -138,7 +138,7 @@ try {
     $pythonVersion = InvokeRecorded 'python-version' $python @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; print(sys.version)')
     $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/windows-shell-link.ps1')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/run-windows-maintenance-entry.ps1', 'tests/harness/windows-shell-link.ps1')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })
@@ -306,6 +306,31 @@ try {
     $componentTests = ReadJson $componentReport
     Require ($componentTests.status -ceq 'PASSED' -and @($componentTests.cases).Count -eq 29 -and @($componentTests.cases | Where-Object { $_.status -cne 'PASSED' }).Count -eq 0 -and @($componentTests.cases.label | Sort-Object -Unique).Count -eq 29) 'Optional component acceptance did not pass all 29 unique cases.'
     $summary.optional_components = @{ status = $componentTests.status; case_count = @($componentTests.cases).Count; report = $componentReport; report_sha256 = Hash $componentReport }
+    $windowsMaintenanceDirectory = Join-Path $runRoot 'windows-maintenance'
+    $null = InvokeRecorded 'windows-maintenance' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-windows-maintenance-entry.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $windowsMaintenanceDirectory)
+    $windowsMaintenanceReport = Join-Path $windowsMaintenanceDirectory 'summary.json'
+    $windowsMaintenance = ReadJson $windowsMaintenanceReport
+    $windowsMaintenanceCases = @(
+        'maintenance-command-registered',
+        'repair-occupied-refused-without-mutation', 'repair-release-retry-without-original-setup',
+        'modify-occupied-refused-without-mutation', 'modify-release-retry-without-original-setup',
+        'resident-silent-maintenance-requires-external-runtime',
+        'installed-recovery-check-is-read-only', 'installed-recovery-apply-without-original-setup',
+        'installed-recovery-repeat-is-idempotent',
+        'upgrade-occupied-refused-without-mutation', 'upgrade-release-retry-keeps-maintenance-entry',
+        'uninstall-occupied-refused-without-mutation', 'uninstall-release-retry-removes-maintenance-entry'
+    )
+    Require ($windowsMaintenance.status -ceq 'PASSED' -and @($windowsMaintenance.cases).Count -eq $windowsMaintenanceCases.Count) 'Windows maintenance acceptance did not pass every required case.'
+    foreach ($label in $windowsMaintenanceCases) {
+        $case = @($windowsMaintenance.cases | Where-Object { $_.label -ceq $label })
+        Require ($case.Count -eq 1 -and $case[0].status -is [string] -and $case[0].status -ceq 'PASSED') "Windows maintenance case absent, duplicated or failed: $label"
+    }
+    Require (@($windowsMaintenance.components).Count -eq $extractedComponents.Count) 'Windows maintenance component count differs.'
+    foreach ($name in $extractedComponents.Keys) {
+        $record = @($windowsMaintenance.components | Where-Object { [string]::Equals([string]$_.path, $extractedComponents[$name], [StringComparison]::OrdinalIgnoreCase) })
+        Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Windows maintenance component does not match the extracted ZIP: $name"
+    }
+    $summary.windows_maintenance = @{ status = $windowsMaintenance.status; case_count = @($windowsMaintenance.cases).Count; report = $windowsMaintenanceReport; report_sha256 = Hash $windowsMaintenanceReport }
     # Make sure validation left the distributable and extracted inputs unchanged.
     $finalVerification = (InvokeRecorded 'verify-kit-after-acceptance' $pwsh @('-NoProfile', '-File', (Join-Path $kitRoot 'Verify-RustDevKit.ps1'), '-KitDirectory', $kitRoot, '-ZipPath', $zipPath)) | ConvertFrom-Json
     Require ($finalVerification.verified -eq $true -and (Hash $zipPath) -ceq $zipHash) 'Package changed during acceptance.'

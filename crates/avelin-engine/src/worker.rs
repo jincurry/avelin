@@ -175,9 +175,13 @@ fn launch_installed_uninstaller() -> Result<i32> {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     ensure!(
         arguments.is_empty()
-            || (arguments.len() == 1 && (arguments[0] == "--silent" || arguments[0] == "/S")),
-        "the installed uninstaller accepts only --silent or /S"
+            || (arguments.len() == 1
+                && (arguments[0] == "--silent"
+                    || arguments[0] == "/S"
+                    || arguments[0] == "--maintenance")),
+        "the installed uninstaller accepts only --silent, /S or --maintenance"
     );
+    let maintenance = arguments.first().is_some_and(|arg| arg == "--maintenance");
     let executable = std::env::current_exe()?;
     ensure!(
         executable
@@ -223,16 +227,22 @@ fn launch_installed_uninstaller() -> Result<i32> {
         manifest.runtime_sha256.as_deref() == Some(runtime.sha256()?.as_str()),
         "installed runtime was changed"
     );
-    std::process::Command::new(runtime.path())
-        .arg(if arguments.is_empty() {
-            "--gui"
-        } else {
-            "--silent"
-        })
-        .args(["--operation", "uninstall", "--backend"])
-        .arg(worker.path())
-        .arg("--manifest")
-        .arg(manifest_path)
+    let mut command = std::process::Command::new(runtime.path());
+    command.arg(if arguments.is_empty() || maintenance {
+        "--gui"
+    } else {
+        "--silent"
+    });
+    if maintenance {
+        command.arg("--maintenance");
+    } else {
+        command
+            .args(["--operation", "uninstall", "--backend"])
+            .arg(worker.path())
+            .arg("--manifest")
+            .arg(manifest_path);
+    }
+    command
         .arg("--install-dir")
         .arg(root)
         .arg("--wait-for-pid")

@@ -4,6 +4,7 @@ pub mod model;
 pub mod native_payload;
 pub mod presentation;
 pub mod protocol;
+pub mod resource_usage;
 pub mod session;
 pub use components::{
     ComponentDefinition, LegacySelection, SelectedResources, SelectionSource, inherited_selection,

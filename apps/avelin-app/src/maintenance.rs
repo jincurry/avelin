@@ -136,6 +136,21 @@ pub struct RepairInputs {
 }
 
 pub fn repair_inputs(manifest: &Manifest, target: &Path, sid: &str) -> Result<RepairInputs> {
+    repair_inputs_impl(manifest, target, sid, false)
+}
+
+/// Locked payloads can still reach the confirmation page and its retry flow.
+/// Ownership metadata and all other errors remain strict; execution rechecks.
+pub fn repair_preview(manifest: &Manifest, target: &Path, sid: &str) -> Result<RepairInputs> {
+    repair_inputs_impl(manifest, target, sid, true)
+}
+
+fn repair_inputs_impl(
+    manifest: &Manifest,
+    target: &Path,
+    sid: &str,
+    allow_busy: bool,
+) -> Result<RepairInputs> {
     avelin_core::install_root(target)?;
     upgrade::ensure_no_pending(target)?;
     matching_installed_manifest(manifest, target)?;
@@ -184,11 +199,28 @@ pub fn repair_inputs(manifest: &Manifest, target: &Path, sid: &str) -> Result<Re
         let display = path.display();
         if !path.try_exists()? {
             findings.push((format!("缺失：{display}"), format!("Missing: {display}")));
-        } else if PinnedFile::open(&path)?.sha256()? != expected_hash {
-            findings.push((
-                format!("已修改，默认保留：{display}"),
-                format!("Changed; preserved by default: {display}"),
-            ));
+        } else {
+            match PinnedFile::open(&path).and_then(|file| file.sha256()) {
+                Ok(hash) if hash != expected_hash => findings.push((
+                    format!("已修改，默认保留：{display}"),
+                    format!("Changed; preserved by default: {display}"),
+                )),
+                Ok(_) => {}
+                Err(error)
+                    if allow_busy
+                        && error.chain().any(|cause| {
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|io| matches!(io.raw_os_error(), Some(32 | 33)))
+                        }) =>
+                {
+                    findings.push((
+                        format!("文件被占用，开始前需要重新检查：{display}"),
+                        format!("File in use; check again before starting: {display}"),
+                    ))
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     match upgrade::registration(&manifest.app_id)? {

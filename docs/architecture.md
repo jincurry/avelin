@@ -45,6 +45,10 @@ Rust 包的外层仍为 runtime + backend + manifest；backend 是 x64 Rust work
 
 运行时核验并释放 Rust worker，通过现有带任务身份的受限命名管道交换结构化进度、取消确认和终态。运行时在启动 worker 前校验原生载荷，拒绝不含有效 Rust 载荷的可执行文件。驻留卸载前端仍先转移到临时目录，再执行归属卸载，以便清理自己的原目录。
 
+系统维护入口由 `ModifyPath` 指向已安装 runtime 的 `--maintenance`。`installed_maintenance.rs` 核对安装记录、manifest、完整 worker 载荷和 runtime，复制到新的私有目录后释放安装源句柄，再交给既有协调器。原安装输入不完整时拒绝并提示使用原始 Setup 与保留会话，不能绕过归属校验。
+
+`preflight.rs` 在普通操作启动 worker 前确定目标资源；`avelin-core/resource_usage.rs` 通过 Windows Restart Manager 和文件访问探测产生只读占用结果。GUI 收到 `PreflightBlocked` 后允许重新检查，静默输出 `NotStarted` 报告。检查不会结束进程，也不保证之后无新占用；执行层继续处理实际冲突。恢复使用原任务证据，不能把部分 receipt 当成完整安装做普通预检。
+
 升级先暂存和备份，执行变更后最后提交完整 receipt。多文件与注册表变更不是一个原子事务；有限进程内恢复无法确认时返回 Unknown 并保留证据。失联不会直接解释为已取消或成功。
 
 Rust 引擎在会话内保存 `engine-journal.jsonl`（安装、卸载、修复）或 `upgrade-journal.jsonl`（升级）；变更期间使用安装根内的 `.avelin/upgrade-state.json` 标记未完成事务。日志记录变更意图、实际结果、提交或恢复结论；恢复失败保留 `engine-recovery.json`、备份和标记。后续操作检测到未完成标记即拒绝继续覆盖。

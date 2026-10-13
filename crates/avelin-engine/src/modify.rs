@@ -253,9 +253,7 @@ pub(crate) fn verify_result(
     for shortcut in &installed.shortcuts {
         confirm(Path::new(&shortcut.path), &shortcut.sha256)?;
     }
-    system::verify_registration(
-        &manifest.app_id,
-        Some(&system::Registration::new(manifest, target)),
-    )?;
+    system::registration_for_product(manifest, target)?
+        .context("component change registration missing")?;
     Ok(report)
 }

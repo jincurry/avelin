@@ -15,6 +15,7 @@ Avelin 将应用发布目录、TOML 配置和品牌资源构建成单个 Setup.e
 - 安装取消、任务日志、安装记录、结果核验和只读诊断。
 - Rust 中断事务的显式恢复；同版本修复缺失资源，默认保留修改内容。
 - 可选组件清单、按组件部署、升级继承选择、同版本增删组件。
+- 系统“更改”维护入口；运行应用/文件占用提示，关闭后重新检查。
 - 卸载保留未知用户文件和已修改的受管资源。
 - `build` 使用原生 Rust worker 构包和部署，工具链只需 Windows x64 组件。
 
@@ -24,7 +25,7 @@ CLI、GUI runtime 和 Rust worker 均面向 Windows x64。尚未提供全用户�
 
 [v0.1.0-preview.1](https://github.com/jincurry/avelin/releases/tag/v0.1.0-preview.1) 提供 Windows x64 ZIP 与 SHA-256。解压后 `bin/` 内 CLI、runtime、worker 可配套构包，无需从源码编译；另附 Nimbus 演示 Setup、文档和第三方材料。该预览版未签名，校验与使用步骤见 Release 说明及包内 README。
 
-当前源码已支持[可选组件](docs/optional-components.md)，提供配置和[通用示例](examples/components/README.md)。上面的已发布 `v0.1.0-preview.1` 二进制不包含此功能，体验组件能力需配套构建当前源码。
+当前源码已支持[可选组件](docs/optional-components.md)及[系统维护入口与占用检查](docs/windows-maintenance.md)，提供配置和[通用示例](examples/components/README.md)。上面的已发布 `v0.1.0-preview.1` 二进制不包含这些新增功能，体验时需配套构建当前源码。
 
 ## 从源码开始
 

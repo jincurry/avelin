@@ -10,6 +10,8 @@ use gpui_kit::component::{
     native_menu::NativeMenu,
     progress::Progress,
 };
+#[cfg(test)]
+use gpui_kit::test::TestSupportExt;
 use gpui_kit::{prelude::FluentBuilder, *};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -37,6 +39,10 @@ mod presentation_view_tests;
 #[cfg(test)]
 #[path = "operation_view_tests.rs"]
 mod operation_view_tests;
+
+#[cfg(test)]
+#[path = "preflight_view_tests.rs"]
+mod preflight_view_tests;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DirectoryMenuLabels {
@@ -484,6 +490,7 @@ impl InstallerView {
                 } => view.start(cx),
                 InputEvent::Change => {
                     view.accepted = false;
+                    view.state.clear_preflight_blocked();
                     if view.status_note.is_some_and(UiNotice::is_input_related) {
                         view.status_note = None;
                     }
@@ -1240,6 +1247,7 @@ impl InstallerView {
                                     }
                                     view.desktop = *checked;
                                     view.accepted = false;
+                                    view.state.clear_preflight_blocked();
                                     cx.notify();
                                 })),
                         )
@@ -1254,6 +1262,7 @@ impl InstallerView {
                                     }
                                     view.start_menu = *checked;
                                     view.accepted = false;
+                                    view.state.clear_preflight_blocked();
                                     cx.notify();
                                 })),
                         ),
@@ -1417,6 +1426,7 @@ impl InstallerView {
                         if view.phase() == UiPhase::Ready {
                             view.desktop = *checked;
                             view.accepted = false;
+                            view.state.clear_preflight_blocked();
                             cx.notify();
                         }
                     })),
@@ -1430,6 +1440,7 @@ impl InstallerView {
                         if view.phase() == UiPhase::Ready {
                             view.start_menu = *checked;
                             view.accepted = false;
+                            view.state.clear_preflight_blocked();
                             cx.notify();
                         }
                     })),
@@ -1744,6 +1755,44 @@ impl Render for InstallerView {
                     .overflow_y_scroll()
                     .px_7()
                     .py_5()
+                    .when_some(self.state.preflight_blocked(), |container, detail| {
+                        container.child(
+                            div()
+                                .id("preflight-blocked")
+                                .role(Role::Alert)
+                                .aria_label(self.localized(
+                                    "暂时无法开始",
+                                    "Cannot start yet",
+                                ))
+                                .aria_description(detail.to_owned())
+                                .map(|container| {
+                                    #[cfg(test)]
+                                    let container = container.test_support();
+                                    container
+                                })
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .mb_5()
+                                .p_4()
+                                .border_1()
+                                .border_color(if dark { rgb(0xfbbf24) } else { rgb(0xb45309) })
+                                .rounded_md()
+                                .text_sm()
+                                .whitespace_normal()
+                                .child(
+                                    div().font_weight(FontWeight::SEMIBOLD).child(self.localized(
+                                        "暂时无法开始",
+                                        "Cannot start yet",
+                                    )),
+                                )
+                                .child(detail.to_owned())
+                                .child(self.localized(
+                                    "任务尚未开始。请按以上提示处理；若列出正在运行的应用，请先保存工作并自行关闭，再点击“重新检查并继续”。也可以安全关闭此窗口，稍后再试。",
+                                    "The task has not started. Resolve the issues above; if applications are listed, save your work and close them, then select Recheck and continue. You can also safely close this window and try later.",
+                                )),
+                        )
+                    })
                     .child(if main {
                         self.render_main(cx)
                     } else {
@@ -1817,7 +1866,9 @@ impl Render for InstallerView {
                                         // Keep readable text on an opaque enabled button; applying this
                                         // only when enabled preserves the kit's disabled styling.
                                         .when(start_enabled, |button| button.bg(primary_background))
-                                        .label(if self.modify() && !self.components_changed() {
+                                        .label(if self.state.preflight_blocked().is_some() {
+                                            self.localized("重新检查并继续", "Recheck and continue")
+                                        } else if self.modify() && !self.components_changed() {
                                             self.localized("无需更改", "No changes")
                                         } else if self.modify() {
                                             self.localized("应用更改", "Apply changes")

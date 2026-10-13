@@ -36,6 +36,11 @@ def main():
     check("examples/receipt.json", "model", "Receipt")
     check("examples/install-plan.json", "model", "InstallPlan")
     command = check("examples/command.json", "protocol", "TaskCommand")
+    blocked = {"response": "preflight_blocked", "detail": "Example (PID 42): example.exe"}
+    validator("protocol", "TaskResponse").validate(blocked)
+    validator("protocol", "TaskResponse").validate(
+        {"response": "launch_result", "succeeded": True, "detail": "Started"})
+    passed.append("host-action-responses")
     check("examples/snapshot.json", "protocol", "TaskSnapshot")
     check("examples/events.json", "protocol", "BackendEvent", array=True)
     for result in ("succeeded", "cancelled", "failed", "unknown"):
@@ -55,6 +60,9 @@ def main():
         ("model", "Manifest", dict(manifest, unknown=True)),
         ("model", "Manifest", dict(manifest, schema_version=2)),
         ("protocol", "TaskCommand", dict(command, unknown=True)),
+        ("protocol", "TaskResponse", dict(blocked, succeeded=False)),
+        ("protocol", "TaskResponse", {"response": "preflight_blocked"}),
+        ("protocol", "TaskResponse", dict(blocked, detail=False)),
         ("protocol", "BackendEvent", {"kind": "finish", "result": "Succeeded", "code": 3}),
         ("protocol", "BackendEvent", {"kind": "progress", "phase": "invented", "completed": 0, "total": 1}),
         ("presentation", None, dict(presentation, template="web")),

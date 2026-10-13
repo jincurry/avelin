@@ -18,22 +18,25 @@ function SaveJson([string]$Path, $Value) {
 function Check([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
-function Project([string]$Name, $ComponentEvidence, [switch]$Absent, [switch]$Failed) {
+function Project([string]$Name, $ComponentEvidence, [switch]$Absent, [switch]$Failed,
+    [ValidateSet('optional-components', 'windows-maintenance')][string]$EvidenceDirectory = 'optional-components') {
     $run = Join-Path $testRoot $Name
     $null = [IO.Directory]::CreateDirectory($run)
     $commandStatus = if ($Failed) { 'FAILED' } else { 'EXITED_ZERO' }
     $status = if ($Failed) { 'FAILED' } else { 'PASSED' }
+    $commandName = if ($EvidenceDirectory -ceq 'windows-maintenance') { 'windows-maintenance' } else { 'rust-optional-components' }
     SaveJson (Join-Path $run 'summary.json') @{
         status = $status
-        commands = @(@{ name = 'rust-optional-components'; status = $commandStatus; arguments = $privateMarker })
+        commands = @(@{ name = $commandName; status = $commandStatus; arguments = $privateMarker },
+            @{ name = $privateMarker; status = 'FAILED'; arguments = $privateMarker })
         failure = $privateMarker
     }
-    if (-not $Absent) { SaveJson (Join-Path $run 'optional-components/summary.json') $ComponentEvidence }
+    if (-not $Absent) { SaveJson (Join-Path $run "$EvidenceDirectory/summary.json") $ComponentEvidence }
     $output = Join-Path $run 'public.json'
     $exitCode = if ($Failed) { 1 } else { 0 }
     $null = & $summarizer -RunDirectory $run -OutputPath $output -Commit ('a' * 40) -ValidationExitCode $exitCode
     $text = [IO.File]::ReadAllText($output)
-    Check (-not $text.Contains($privateMarker)) 'Private component labels or details leaked into public summary'
+    Check (-not $text.Contains($privateMarker)) 'Private labels, paths, commands or details leaked into public summary'
     return ($text | ConvertFrom-Json -AsHashtable)
 }
 $missing = Project 'missing-evidence' $null -Absent
@@ -64,5 +67,37 @@ Check ($failed.status -ceq 'FAILED') 'Component rows must not turn a failed veri
 Check ($failed.optional_component_case_count -eq 2) 'Failed run must retain its valid completed case count'
 Check ($failed.failed_command -ceq 'rust-optional-components') 'Failed optional component command is not identified'
 Check ($failed.failure_category -ceq 'command_failed') 'Failed command category changed'
+$caseCount++
+$windowsMissing = Project 'windows-missing-evidence' $null -Absent -EvidenceDirectory 'windows-maintenance'
+Check ($windowsMissing.windows_maintenance_case_count -eq 0) 'Missing Windows maintenance evidence must produce zero cases'
+Check ($windowsMissing.last_command -ceq 'windows-maintenance') 'Windows maintenance command is not recognized'
+Check ($windowsMissing.completed_commands -eq 1) 'Unknown command must not affect public command counts'
+$caseCount++
+$windowsEvidence = @{
+    status = 'PASSED'
+    cases = $mixedEvidence.cases
+    components = @(@{ path = "C:\PrivateFixture\$privateMarker\tool.exe"; sha256 = $privateMarker })
+    preflight = @{
+        processes = @(@{ name = $privateMarker; executable = $privateMarker; pid = 12345 })
+        locked_files = @(@{ path = $privateMarker; win32_error = 32 })
+        issues = @(@{ scope = $privateMarker; message = $privateMarker })
+    }
+    failure = $privateMarker
+    failure_trace = @(@{ function = $privateMarker; line = 123 })
+    user_sid = $privateMarker
+}
+$windowsMixed = Project 'windows-mixed-evidence' $windowsEvidence -EvidenceDirectory 'windows-maintenance'
+Check ($windowsMixed.windows_maintenance_case_count -eq 2) 'Only Windows maintenance object cases with exact string PASSED may count'
+Check ($windowsMixed.optional_component_case_count -eq 0) 'Windows evidence must not populate optional-component counts'
+Check (-not $windowsMixed.Contains('windows_maintenance') -and -not $windowsMixed.Contains('preflight')) 'Private Windows evidence objects must not be exposed'
+$caseCount++
+$windowsMalformed = Project 'windows-non-object-evidence' @('not-a-summary', $privateMarker) -EvidenceDirectory 'windows-maintenance'
+Check ($windowsMalformed.windows_maintenance_case_count -eq 0) 'Malformed Windows maintenance evidence must produce zero cases'
+$caseCount++
+$windowsFailed = Project 'windows-failed-run' $windowsEvidence -Failed -EvidenceDirectory 'windows-maintenance'
+Check ($windowsFailed.status -ceq 'FAILED') 'Windows maintenance rows must not turn failed verification into success'
+Check ($windowsFailed.windows_maintenance_case_count -eq 2) 'Failed run must retain its completed Windows maintenance case count'
+Check ($windowsFailed.failed_command -ceq 'windows-maintenance') 'Failed Windows maintenance command is not identified'
+Check ($windowsFailed.failure_category -ceq 'command_failed') 'Failed Windows maintenance command category changed'
 $caseCount++
 [ordered]@{ status='PASSED'; projection_cases=$caseCount; evidence=$testRoot } | ConvertTo-Json

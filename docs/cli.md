@@ -119,3 +119,14 @@ avelin-cli recover --session '<原任务会话目录>' --setup '<该任务的原
 | repair / recover / uninstall | 拒绝 `--components`，按原安装记录或冻结计划执行 |
 
 GUI 使用清单选择，同版本原包维护页提供“修复安装 / 更改组件”。旧 schema 1 文件归属迁移若需要确认，GUI 展示映射并额外确认；静默模式显式传入完整组件集合表达迁移意图，不另设迁移开关。文件保护与原包核验仍然生效。配置、路径规则和空间说明见[可选组件](optional-components.md)。
+
+## 使用已安装离线载荷维护
+
+`--maintenance` 是 runtime 参数，使用 `--install-dir` 指定的已安装 manifest、receipt、runtime 和完整 worker 载荷，验证后从私有副本维护；不与任意 `--backend` / `--manifest` 组合。GUI 默认发现待恢复任务或进入同版本修复，组件包可切换更改页。静默必须明确选择维护操作，例如：
+
+```powershell
+& '<工具包>/bin/avelin-app.exe' --maintenance --silent --operation repair --install-dir '<原安装目录>' --report '<新报告路径>'
+& '<工具包>/bin/avelin-app.exe' --maintenance --silent --operation modify --install-dir '<原安装目录>' --components core,component-a --report '<新报告路径>'
+```
+
+外部 runtime 等待静默结果并返回实际退出码；安装目录内的驻留 runtime 不接受 `--maintenance --silent`，请使用外部配套 runtime 或原始 Setup，驻留 GUI 入口不受影响。普通操作占用预检阻塞时，静默退出 `3`，报告 `result: "NotStarted"`、`worker_started: false` 和诊断码 `AVELIN_RESOURCES_IN_USE`；`preflight` 包含进程/PID、被占用文件和未能完成的检查。释放占用后用新报告路径重试。GUI 提供“重新检查”，不会强制退出应用。`recover` 仍使用原证据规则。完整命令限制和降级路径见[Windows 维护入口](windows-maintenance.md)。

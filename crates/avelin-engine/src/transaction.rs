@@ -443,7 +443,8 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                 inventory.schema_version == 1 && inventory.task_id == request.plan.task_id,
                 "upgrade inventory identity mismatch"
             );
-            let expected = Registration::new(&old, root);
+            let expected = system::registration_for_product(&old, root)?
+                .context("upgrade registration is missing")?;
             ensure!(
                 inventory.registration == expected,
                 "upgrade registration snapshot mismatch"
@@ -612,7 +613,8 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                         == request.plan.start_menu_shortcut,
                 "component changes must retain installed shortcuts"
             );
-            let expected = Registration::new(request.manifest, root);
+            let expected = system::registration_for_product(request.manifest, root)?
+                .context("component change registration is missing")?;
             system::verify_registration(&request.plan.app_id, Some(&expected))?;
             modify_snapshot = Some(snapshot);
             Some(expected)
@@ -666,7 +668,8 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                     "uninstall internal component is missing or changed"
                 );
             }
-            let expected = Registration::new(request.manifest, root);
+            let expected = system::registration_for_product(request.manifest, root)?
+                .context("uninstall registration is missing")?;
             system::verify_registration(&request.plan.app_id, Some(&expected))?;
             Some(expected)
         }
@@ -691,18 +694,17 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                         == request.plan.start_menu_shortcut,
                 "repair must retain the installed shortcut choices"
             );
-            let expected = Registration::new(request.manifest, root);
-            if system::verify_registration(&request.plan.app_id, Some(&expected)).is_ok() {
-                Some(expected)
-            } else {
-                system::verify_registration(&request.plan.app_id, None)?;
-                None
-            }
+            system::registration_for_product(request.manifest, root)?
         }
         Operation::Recover => bail!("recovery uses its separate evidence-bound entry point"),
     };
-    let next_registration = (request.plan.operation != Operation::Uninstall)
-        .then(|| Registration::new(request.manifest, root));
+    let next_registration = match request.plan.operation {
+        Operation::Uninstall => None,
+        Operation::Modify | Operation::Repair => registration
+            .clone()
+            .or_else(|| Some(Registration::new(request.manifest, root))),
+        _ => Some(Registration::new(request.manifest, root)),
+    };
     check_transaction_space(request, &backup_resources)?;
     let stage_dir = request.session_dir.join("staging");
     let backup_dir = request.session_dir.join("backup");
@@ -1420,7 +1422,7 @@ pub(crate) fn verify_repair(
             preserved.push(path.to_string_lossy().into_owned());
         }
     }
-    system::verify_registration(&manifest.app_id, Some(&Registration::new(manifest, target)))?;
+    system::registration_for_product(manifest, target)?.context("repair registration missing")?;
     Ok(crate::RepairReport {
         schema_version: 1,
         task_id: receipt.task_id,
@@ -1775,7 +1777,7 @@ mod tests {
             }
             fs::write(session.join("previous-receipt.json"), &receipt_bytes).unwrap();
             fs::write(session.join("previous-manifest.json"), &manifest_bytes).unwrap();
-            fs::write(session.join("upgrade-resources.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema_version":1,"task_id":"task-upgrade","backup":backup,"preserved":preserved,"registration":Registration::new(&old,&self.root)})).unwrap()).unwrap();
+            fs::write(session.join("upgrade-resources.json"),serde_json::to_vec_pretty(&serde_json::json!({"schema_version":1,"task_id":"task-upgrade","backup":backup,"preserved":preserved,"registration":system::registration_for_product(&old,&self.root).unwrap().unwrap()})).unwrap()).unwrap();
             let selection = avelin_core::inherited_selection(new, &old, &old_receipt).unwrap();
             let selected = avelin_core::resolve_selection(new, &selection).unwrap();
             let upgrade = avelin_core::UpgradePlan {
@@ -2499,6 +2501,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn repair_and_uninstall_preserve_legacy_registration_compatibility() {
+        let fixture = Fixture::new();
+        let payload = payload();
+        let install = fixture.session("install");
+        assert_eq!(
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default()
+            )
+            .unwrap()
+            .exit_code,
+            0
+        );
+        let legacy = Registration::legacy(&fixture.manifest, &fixture.root);
+        system::replace_registration(
+            &fixture.manifest.app_id,
+            Some(&Registration::new(&fixture.manifest, &fixture.root)),
+            Some(&legacy),
+            &mut None,
+        )
+        .unwrap();
+        fs::remove_file(fixture.root.join("entry.txt")).unwrap();
+        let session = fixture.session("repair-legacy");
+        let original = fs::read(fixture.root.join(RECEIPT_NAME)).unwrap();
+        fs::write(session.join("prior-receipt.json"), &original).unwrap();
+        let mut candidate: Receipt = serde_json::from_slice(&original).unwrap();
+        candidate.previous_commit_id = Some(candidate.commit_id.clone());
+        candidate.task_id = "repair-legacy".into();
+        candidate.commit_id = "commit-repair-legacy".into();
+        candidate.uninstaller_sha256 = None;
+        let plan = InstallPlan::new(
+            &fixture.manifest,
+            Operation::Repair,
+            candidate.task_id.clone(),
+            fixture.root.clone(),
+            fixture.plan.user_sid.clone(),
+        )
+        .unwrap();
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &candidate;
+        let outcome = execute(request, &mut Observer::default()).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
+        assert_eq!(
+            fs::read(fixture.root.join("entry.txt")).unwrap(),
+            b"payload"
+        );
+        system::verify_registration(&fixture.manifest.app_id, Some(&legacy)).unwrap();
+        verify_repair(&fixture.manifest, &fixture.root, &fixture.plan.user_sid).unwrap();
+
+        let session = fixture.session("uninstall-legacy");
+        let receipt: Receipt =
+            serde_json::from_slice(&fs::read(fixture.root.join(RECEIPT_NAME)).unwrap()).unwrap();
+        let plan = InstallPlan::new(
+            &fixture.manifest,
+            Operation::Uninstall,
+            "uninstall-legacy".into(),
+            fixture.root.clone(),
+            fixture.plan.user_sid.clone(),
+        )
+        .unwrap();
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &receipt;
+        let outcome = execute(request, &mut Observer::default()).unwrap();
+        assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
+        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+    }
+
     struct InterruptPublish;
     impl EngineObserver for InterruptPublish {
         fn progress(&mut self, phase: &str, current: u64, _: u64) -> Result<()> {
@@ -2720,7 +2792,12 @@ mod tests {
                 Ok(false)
             }
         }
-        for operation in [Operation::Upgrade, Operation::Uninstall] {
+        for (operation, legacy) in [
+            (Operation::Upgrade, false),
+            (Operation::Uninstall, false),
+            (Operation::Upgrade, true),
+            (Operation::Uninstall, true),
+        ] {
             let fixture = Fixture::new();
             let install = fixture.session("install");
             let payload = payload();
@@ -2733,6 +2810,19 @@ mod tests {
                 .exit_code,
                 0
             );
+            let expected_registration = if legacy {
+                let legacy = Registration::legacy(&fixture.manifest, &fixture.root);
+                system::replace_registration(
+                    &fixture.manifest.app_id,
+                    Some(&Registration::new(&fixture.manifest, &fixture.root)),
+                    Some(&legacy),
+                    &mut None,
+                )
+                .unwrap();
+                legacy
+            } else {
+                Registration::new(&fixture.manifest, &fixture.root)
+            };
             let original = fs::read(fixture.root.join(RECEIPT_NAME)).unwrap();
             let session = fixture.session("interrupted-maintenance");
             let mut manifest = fixture.manifest.clone();
@@ -2794,11 +2884,16 @@ mod tests {
                 fs::read(fixture.root.join("entry.txt")).unwrap(),
                 b"payload"
             );
-            system::verify_registration(
-                &manifest.app_id,
-                Some(&Registration::new(&fixture.manifest, &fixture.root)),
-            )
-            .unwrap();
+            system::verify_registration(&manifest.app_id, Some(&expected_registration)).unwrap();
+            if legacy {
+                system::replace_registration(
+                    &fixture.manifest.app_id,
+                    Some(&expected_registration),
+                    Some(&Registration::new(&fixture.manifest, &fixture.root)),
+                    &mut None,
+                )
+                .unwrap();
+            }
         }
     }
     #[test]

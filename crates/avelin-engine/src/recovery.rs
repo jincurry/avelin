@@ -569,17 +569,20 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
             || record.receipt.task_id == record.plan.task_id,
         "recovery receipt belongs to another task"
     );
-    let expected_after = system::registration_expected(
-        (record.plan.operation != Operation::Uninstall)
-            .then(|| system::Registration::new(request.manifest, request.target))
-            .as_ref(),
-    );
     ensure!(
-        record.next_registration == expected_after,
+        if record.plan.operation == Operation::Uninstall {
+            record.next_registration == system::registration_expected(None)
+        } else {
+            system::snapshot_matches_product(
+                &record.next_registration,
+                request.manifest,
+                request.target,
+            )
+        },
         "recovery registration target differs from package"
     );
     let expected_before = match record.plan.operation {
-        Operation::Install => system::registration_expected(None),
+        Operation::Install => record.registration == system::registration_expected(None),
         Operation::Upgrade => {
             let previous = read(&request.session.join("previous-receipt.json"))?;
             let receipt: Receipt = serde_json::from_slice(&previous)?;
@@ -599,7 +602,7 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
                         == Some(receipt.commit_id.as_str()),
                 "recovery upgrade receipt lost previous installation identity"
             );
-            system::registration_expected(Some(&system::Registration::new(old, request.target)))
+            system::snapshot_matches_product(&record.registration, old, request.target)
         }
         Operation::Modify => {
             let previous = read(&request.session.join("previous-receipt.json"))?;
@@ -652,10 +655,7 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
                     && b.resource.sha256 == hash_bytes(&previous)),
                 "component recovery original receipt backup missing"
             );
-            system::registration_expected(Some(&system::Registration::new(
-                request.manifest,
-                request.target,
-            )))
+            system::snapshot_matches_product(&record.registration, request.manifest, request.target)
         }
         Operation::Repair => {
             let previous = read(&request.session.join("prior-receipt.json"))?;
@@ -667,22 +667,25 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
                     && v.resource.sha256 == hash_bytes(&previous)),
                 "repair recovery lacks its original receipt backup"
             );
-            system::registration_expected(Some(&system::Registration::new(
-                request.manifest,
-                request.target,
-            )))
+            system::snapshot_matches_product(&record.registration, request.manifest, request.target)
+                || record.registration == system::registration_expected(None)
         }
-        _ => system::registration_expected(Some(&system::Registration::new(
-            request.manifest,
-            request.target,
-        ))),
+        _ => {
+            system::snapshot_matches_product(&record.registration, request.manifest, request.target)
+        }
     };
     ensure!(
-        record.registration == expected_before
-            || (record.plan.operation == Operation::Repair
-                && record.registration == system::registration_expected(None)),
+        expected_before,
         "recovery registration source differs from original ownership"
     );
+    if matches!(record.plan.operation, Operation::Modify | Operation::Repair)
+        && record.registration != system::registration_expected(None)
+    {
+        ensure!(
+            record.registration == record.next_registration,
+            "maintenance recovery must retain the original registration shape"
+        );
+    }
     confirm(
         &request.session.join("install-plan.json"),
         record

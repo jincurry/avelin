@@ -17,6 +17,8 @@ pub struct Registration {
     pub install_location: String,
     pub uninstall_string: String,
     pub quiet_uninstall_string: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_path: Option<String>,
     pub no_modify: u32,
     pub no_repair: u32,
 }
@@ -39,10 +41,25 @@ impl Registration {
             install_location: target.to_string_lossy().into_owned(),
             uninstall_string: command(false),
             quiet_uninstall_string: command(true),
-            no_modify: 1,
+            modify_path: Some(format!(
+                "\"{}\" --gui --maintenance --install-dir \"{}\"",
+                target.join(".avelin").join("avelin-app.exe").display(),
+                target.display()
+            )),
+            no_modify: 0,
             no_repair: 1,
         }
     }
+
+    /// Old installations and durable recovery records have exactly seven values.
+    /// Only that complete historical shape is accepted, never a partial modern key.
+    pub fn legacy(manifest: &Manifest, target: &Path) -> Self {
+        let mut value = Self::new(manifest, target);
+        value.modify_path = None;
+        value.no_modify = 1;
+        value
+    }
+
     fn values(&self) -> Values {
         let mut values = BTreeMap::new();
         for (key, value) in [
@@ -62,6 +79,15 @@ impl Registration {
         }
         for (key, value) in [("NoModify", self.no_modify), ("NoRepair", self.no_repair)] {
             values.insert(key.to_string(), (4, value.to_le_bytes().to_vec()));
+        }
+        if let Some(value) = &self.modify_path {
+            values.insert(
+                "ModifyPath".into(),
+                (
+                    1,
+                    wide(value).iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ),
+            );
         }
         values
     }
@@ -91,6 +117,33 @@ pub(crate) fn registration_expected(registration: Option<&Registration>) -> Regi
     RegistrationSnapshot {
         values: registration.map(Registration::values),
     }
+}
+
+pub(crate) fn snapshot_matches_product(
+    snapshot: &RegistrationSnapshot,
+    manifest: &Manifest,
+    target: &Path,
+) -> bool {
+    snapshot == &registration_expected(Some(&Registration::new(manifest, target)))
+        || snapshot == &registration_expected(Some(&Registration::legacy(manifest, target)))
+}
+
+pub(crate) fn registration_for_product(
+    manifest: &Manifest,
+    target: &Path,
+) -> Result<Option<Registration>> {
+    let Some(values) = raw_snapshot(&manifest.app_id)? else {
+        return Ok(None);
+    };
+    for registration in [
+        Registration::new(manifest, target),
+        Registration::legacy(manifest, target),
+    ] {
+        if values == registration.values() {
+            return Ok(Some(registration));
+        }
+    }
+    anyhow::bail!("registered product differs from its complete current or legacy registration")
 }
 
 fn validate_snapshot(snapshot: &RegistrationSnapshot) -> Result<()> {
@@ -124,7 +177,7 @@ fn validate_snapshot(snapshot: &RegistrationSnapshot) -> Result<()> {
     }
     Ok(())
 }
-const NAMES: [&str; 7] = [
+const NAMES: [&str; 8] = [
     "DisplayName",
     "DisplayVersion",
     "InstallLocation",
@@ -132,6 +185,7 @@ const NAMES: [&str; 7] = [
     "QuietUninstallString",
     "NoModify",
     "NoRepair",
+    "ModifyPath",
 ];
 type Handle = *mut c_void;
 const HKCU: Handle = 0x80000001u32 as i32 as isize as Handle;
@@ -304,7 +358,7 @@ const REGISTRATION_ACCESS: u32 = 0x0001 | 0x0002 | 0x0001_0000 | 0x0100;
 
 /// A live identity for this operation's registry mutations. Holding a key does
 /// not lock its values: snapshots are rechecked before each write. Observable
-/// competing changes cause conservative failure; seven registry values are
+/// competing changes cause conservative failure; registered values are
 /// neither atomic nor isolated from an unrelated writer to this same key.
 /// Crucially, recovery never reopens an updated/created key by pathname.
 pub struct RegistrationChange {
@@ -823,6 +877,72 @@ pub fn shortcut_bytes(target: &Path, working_dir: &Path) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn product_registration_accepts_only_complete_current_or_legacy_shapes() {
+        let fixture = RegistryFixture::new();
+        let mut manifest: Manifest =
+            serde_json::from_str(include_str!("../../../docs/schemas/examples/manifest.json"))
+                .unwrap();
+        manifest.app_id = fixture.id.clone();
+        let target = Path::new(r"C:\Apps\示例应用");
+        let old = Registration::legacy(&manifest, target);
+        let current = Registration::new(&manifest, target);
+        assert_eq!(old.values().len(), 7);
+        assert_eq!(current.values().len(), 8);
+        assert_eq!(
+            current.modify_path.as_deref(),
+            Some(
+                r#""C:\Apps\示例应用\.avelin\avelin-app.exe" --gui --maintenance --install-dir "C:\Apps\示例应用""#
+            )
+        );
+        let old_json = serde_json::to_value(&old).unwrap();
+        assert!(old_json.get("modify_path").is_none());
+        assert_eq!(
+            serde_json::from_value::<Registration>(old_json).unwrap(),
+            old
+        );
+        fixture.install(&old);
+        assert_eq!(
+            registration_for_product(&manifest, target).unwrap(),
+            Some(old.clone())
+        );
+        let mut change = None;
+        replace_registration(&fixture.id, Some(&old), Some(&current), &mut change).unwrap();
+        assert_eq!(
+            registration_for_product(&manifest, target).unwrap(),
+            Some(current.clone())
+        );
+        assert!(snapshot_matches_product(
+            &registration_expected(Some(&old)),
+            &manifest,
+            target
+        ));
+        assert!(snapshot_matches_product(
+            &registration_expected(Some(&current)),
+            &manifest,
+            target
+        ));
+        change.as_mut().unwrap().restore().unwrap();
+        verify_registration(&fixture.id, Some(&old)).unwrap();
+
+        let mut malformed = current.clone();
+        malformed.modify_path = None;
+        replace_registration(&fixture.id, Some(&old), Some(&malformed), &mut None).unwrap();
+        assert!(registration_for_product(&manifest, target).is_err());
+        assert!(!snapshot_matches_product(
+            &registration_expected(Some(&malformed)),
+            &manifest,
+            target
+        ));
+        let mut foreign = current.clone();
+        foreign.modify_path = Some("unrelated.exe --maintenance".into());
+        assert!(!snapshot_matches_product(
+            &registration_expected(Some(&foreign)),
+            &manifest,
+            target
+        ));
+    }
+
     struct RegistryFixture {
         id: String,
     }
@@ -839,6 +959,7 @@ mod tests {
                 install_location: r"C:\Avelin Test".into(),
                 uninstall_string: "test uninstall".into(),
                 quiet_uninstall_string: "test quiet uninstall".into(),
+                modify_path: None,
                 no_modify: 1,
                 no_repair: 1,
             }

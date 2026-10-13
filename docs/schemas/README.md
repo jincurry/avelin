@@ -49,6 +49,16 @@ Rust 维护操作新增 `operation: repair` 和 `operation: recover`，不携带
 
 维护任务报告在原有任务结果外包含 `repair` 或 `recovery` 详情以及 `maintenance_status`。`RepairComplete` 表示核验后的完整修复，`RepairPreservedConflicts` 表示仍保留修改资源，`RecoveryChecked` 表示只完成检查，`RecoveryComplete` 表示已执行并核验恢复。自动化还须检查对应任务、详情、进程结果和真实资源，不能把 `Succeeded` 一概当作“全部修复完成”。
 
+## 启动前占用反馈与系统入口
+
+`TaskResponse` 新增 `{"response":"preflight_blocked","detail":"..."}`。这是协调器拒绝一次尚未启动的请求，不是 `BackendEvent`、任务终态或回滚成功。UI 只在已请求 Start 且未观察到执行时恢复可确认状态，显示占用详情和“重新检查”；已执行/终态/失联状态不接受迟到的反馈。重新检查仍发完整 Start 意图，再由协调器验证，不能重放已经启动过的任务。
+
+只读占用结果 `UsageReport` 包含 `processes`、`locked_files`、`issues`、`reboot_reasons`、`checked_files`。进程以 PID 和创建时间标识；应用列表与文件锁列表是独立观察，没有确切归属时不把它们组合成进程到文件的映射。查询问题不是“未占用”。静默阻塞报告使用 `result: NotStarted`、退出码 `3`、`worker_started: false`、诊断码 `AVELIN_RESOURCES_IN_USE` 及 `preflight`，没有新建安装任务的成功/失败结果。恢复操作依原始证据处理，不按普通 receipt 做占用预检。
+
+新 Win32 登记在原七值基础上增加 `ModifyPath`，`NoModify=0`、`NoRepair=1`；命令指向已安装 runtime 的 `--maintenance --gui --install-dir` 入口。它校验安装身份和完整离线载荷后复制到私有目录执行，不信任注册表中的任意命令。新字段不是 manifest/receipt schema 的组成部分。
+
+历史完整七值登记（无 `ModifyPath`、`NoModify=1`）仍合法；混合或篡改后的登记形状拒绝。内部登记模型的 `modify_path` 可省略，旧 `upgrade-resources.json` 和恢复快照仍按其原字节/原字段集合核验。升级写入当前形状，修复/更改保留原形状，回滚还原准确旧值，不通过填补字段把历史快照变成新记录。使用方式见[Windows 维护入口](../windows-maintenance.md)。
+
 离线 schema 检查：在 Python 环境安装 `jsonschema==4.23.0` 后，从项目根目录执行：
 
 ```powershell

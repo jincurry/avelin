@@ -658,6 +658,15 @@ try {
     $summary.uncovered = @('GUI interaction', 'uninstall execution fault checkpoints', 'process interruption and recovery interruption', 'physical volume exhaustion', 'historical NSIS runtime version matrix', 'signing and independent environments')
 } catch {
     $summary.status = 'FAILED'; $summary.failure = $_.Exception.Message
+    # Keep source locations separately from private stack paths so CI can publish
+    # a useful failure trace without exposing the account or fixture directory.
+    $summary.failure_trace = @(
+        foreach ($frame in ($_.ScriptStackTrace -split '\r?\n')) {
+            if ($frame -match '^at (?<function>[A-Za-z0-9_<>-]+), .+: line (?<line>[0-9]+)$') {
+                [pscustomobject]@{ function = $Matches.function; line = [int]$Matches.line }
+            }
+        }
+    )
     if (Get-Variable InstallRoot -Scope Script -ErrorAction SilentlyContinue) { try { Save 'failure.resources.json' (ProductSnapshot) } catch { $summary.snapshot_failure = $_.Exception.Message } }
     throw
 } finally {

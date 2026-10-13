@@ -110,8 +110,24 @@ function Inventory([string]$Root) {
     return @($rows | Sort-Object path)
 }
 function ReadJson([string]$Path) { Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json }
+function ReadUserShellFolders {
+    foreach ($folder in @([Environment+SpecialFolder]::DesktopDirectory, [Environment+SpecialFolder]::Programs)) {
+        $verified = [Environment]::GetFolderPath($folder)
+        $unverified = [Environment]::GetFolderPath($folder, [Environment+SpecialFolderOption]::DoNotVerify)
+        [ordered]@{
+            folder = $folder.ToString()
+            default_nonempty = -not [string]::IsNullOrEmpty($verified)
+            unverified_absolute = [IO.Path]::IsPathFullyQualified($unverified)
+            exists = [IO.Directory]::Exists($unverified)
+        }
+    }
+}
 
 try {
+    # Real lifecycle fixtures create current-user shortcuts. Check the existing
+    # profile before the expensive build; do not create folders or expose paths.
+    $summary.user_shell_folders = @(ReadUserShellFolders)
+    Require (@($summary.user_shell_folders | Where-Object { -not ($_.default_nonempty -and $_.unverified_absolute -and $_.exists) }).Count -eq 0) 'Required current-user Desktop or Programs folder is unavailable; provision the Windows user profile before running lifecycle acceptance.'
     $rustup = FindTool 'rustup.exe'
     $python = FindTool 'python.exe' $PythonPath
     $pwsh = Join-Path $PSHOME 'pwsh.exe'

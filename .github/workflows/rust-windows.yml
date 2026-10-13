@@ -86,48 +86,13 @@ jobs:
       - name: Prepare public validation summary
         if: always()
         run: |
-          $public = [ordered]@{
-            schema_version = 1
-            status = 'FAILED'
-            commit = '${{ github.sha }}'
-            runner = 'windows-2025'
-            engine = 'rust'
-            lifecycle_case_count = 0
-            interruption_case_count = 0
-            migration_required = $true
-            package_sha256 = $null
-            failed_command = $null
-            last_command = $null
-            last_command_status = $null
-            completed_commands = 0
-            failure_category = 'preparation_or_invocation_failed'
-          }
-          if ($env:AVELIN_RUST_CI_REPORT -and (Test-Path -LiteralPath $env:AVELIN_RUST_CI_REPORT)) {
-            $report = Get-Content -LiteralPath $env:AVELIN_RUST_CI_REPORT -Raw | ConvertFrom-Json
-            if ($env:AVELIN_RUST_CI_EXIT -eq '0' -and $report.status -ceq 'PASSED') {
-              $public.status = 'PASSED'
-              $public.failure_category = $null
-            } else {
-              $public.failure_category = 'verification_failed_after_command'
-            }
-            if ($report.lifecycle) { $public.lifecycle_case_count = [int]$report.lifecycle.case_count }
-            if ($report.interruption) { $public.interruption_case_count = [int]$report.interruption.case_count }
-            if ($report.package -and $report.package.zip_sha256 -match '^[0-9a-f]{64}$') { $public.package_sha256 = $report.package.zip_sha256 }
-            $public.completed_commands = @($report.commands | Where-Object { $_.status -ceq 'EXITED_ZERO' }).Count
-            $last = @($report.commands | Select-Object -Last 1)
-            if ($last.Count -eq 1 -and $last[0].name -match '^[a-z0-9-]+$') {
-              $public.last_command = $last[0].name
-              if ($last[0].status -cin @('STARTING', 'RUNNING', 'EXITED_ZERO', 'FAILED')) { $public.last_command_status = $last[0].status }
-            }
-            $failed = @($report.commands | Where-Object { $_.status -cne 'EXITED_ZERO' } | Select-Object -Last 1)
-            if ($failed.Count -eq 1 -and $failed[0].name -match '^[a-z0-9-]+$') {
-              $public.failed_command = $failed[0].name
-              $public.failure_category = 'command_failed'
-            }
-          }
-          $null = New-Item -ItemType Directory -Path target/rust-ci-public -Force
-          $public | ConvertTo-Json | Set-Content -LiteralPath target/rust-ci-public/summary.json -Encoding utf8
-          $public | ConvertTo-Json | Write-Output
+          $runDirectory = "target/rust-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $exitCode = 1
+          if ($env:AVELIN_RUST_CI_EXIT -match '^\d+$') { $exitCode = [int]$env:AVELIN_RUST_CI_EXIT }
+          $public = ./scripts/summarize-rust-ci.ps1 -RunDirectory $runDirectory `
+            -OutputPath target/rust-ci-public/summary.json -Commit '${{ github.sha }}' `
+            -ValidationExitCode $exitCode | ConvertFrom-Json
+          $public | ConvertTo-Json -Depth 12 | Write-Output
           "## Rust preview validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Preserve public validation summary
         if: always()

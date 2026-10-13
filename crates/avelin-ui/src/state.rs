@@ -97,7 +97,10 @@ impl UiState {
     pub(crate) fn can_launch(&self) -> bool {
         self.connected
             && self.responses_open
-            && matches!(self.operation, Operation::Install | Operation::Upgrade)
+            && matches!(
+                self.operation,
+                Operation::Install | Operation::Upgrade | Operation::Repair
+            )
             && self.phase() == UiPhase::Succeeded
             && matches!(
                 self.launch_status,

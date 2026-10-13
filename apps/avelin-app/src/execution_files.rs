@@ -460,41 +460,6 @@ pub fn copy_file(
     create_file(directory, name, &source.read_bytes()?)
 }
 
-/// Exclusive in-place update of a verified existing record. Errors can leave a
-/// partial record; the caller must preserve that scene and report Unknown.
-pub fn update_existing_file(
-    directory: &PinnedDirectory,
-    name: &str,
-    expected_sha256: &str,
-    bytes: &[u8],
-) -> Result<()> {
-    checked_name(name)?;
-    ensure!(
-        expected_sha256.len() == 64 && expected_sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-        "invalid expected execution record hash"
-    );
-    let path = checked_path(&directory.path().join(name))?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .share_mode(0)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(&path)
-        .with_context(|| format!("open existing execution record {}", path.display()))?;
-    ensure_regular_file(&file)?;
-    let mut original = Vec::new();
-    file.read_to_end(&mut original)?;
-    ensure!(
-        hash_bytes(&original).eq_ignore_ascii_case(expected_sha256),
-        "existing execution record hash mismatch"
-    );
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(bytes)?;
-    file.set_len(bytes.len() as u64)?;
-    file.sync_all()?;
-    Ok(())
-}
-
 /// Constrain subsequent default dynamic DLL loads to the executable directory
 /// and System32. This runs after Windows has resolved the initial import table;
 /// it cannot retroactively authenticate those initial DLLs or other processes.
@@ -817,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hard_links_for_pins_and_existing_record_updates() {
+    fn rejects_hard_links_for_pins() {
         let mut fixture = Fixture::new();
         let original = fixture.file("original.bin", b"linked");
         let alias = fixture.root.join("alias.bin");
@@ -825,55 +790,7 @@ mod tests {
         fixture.files.push(alias.clone());
         assert!(PinnedFile::open(&original).is_err());
         assert!(PinnedFile::open(&alias).is_err());
-        let directory = PinnedDirectory::open(&fixture.root).unwrap();
-        assert!(
-            update_existing_file(
-                &directory,
-                "original.bin",
-                &hash_bytes(b"linked"),
-                b"updated"
-            )
-            .is_err()
-        );
         assert_eq!(fs::read(&original).unwrap(), b"linked");
-    }
-
-    #[test]
-    fn existing_record_update_checks_old_hash_and_preserves_acl() {
-        let mut fixture = Fixture::new();
-        let path = fixture.file("receipt.json", b"previous longer bytes");
-        let directory = PinnedDirectory::open(&fixture.root).unwrap();
-        let old_acl = access(&path);
-        assert!(
-            update_existing_file(
-                &directory,
-                "receipt.json",
-                &hash_bytes(b"different"),
-                b"new"
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(&path).unwrap(), b"previous longer bytes");
-        let pin = PinnedFile::open(&path).unwrap();
-        assert!(
-            update_existing_file(&directory, "receipt.json", &pin.sha256().unwrap(), b"new")
-                .is_err()
-        );
-        drop(pin);
-        update_existing_file(
-            &directory,
-            "receipt.json",
-            &hash_bytes(b"previous longer bytes"),
-            b"new",
-        )
-        .unwrap();
-        assert_eq!(fs::read(&path).unwrap(), b"new");
-        let new_acl = access(&path);
-        assert_eq!(new_acl.owner, old_acl.owner);
-        assert_eq!(new_acl.protected, old_acl.protected);
-        assert_eq!(new_acl.entries, old_acl.entries);
-        assert!(update_existing_file(&directory, "absent.json", &hash_bytes(b""), b"new").is_err());
-        assert!(!fixture.root.join("absent.json").exists());
     }
 
     fn create_junction(path: &Path, target: &Path) {

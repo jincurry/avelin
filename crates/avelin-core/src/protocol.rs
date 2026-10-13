@@ -304,8 +304,8 @@ impl BackendEvents {
                 BackendEvent::Finished(result) if result == first => {}
                 BackendEvent::Finished(_) => self.record_fault("conflicting terminal event"),
                 BackendEvent::Progress(_) => self.record_fault("progress after terminal event"),
-                // The bridge I/O thread can acknowledge an in-flight cancellation
-                // while its Finish call is joining. It cannot change task metrics.
+                // The worker I/O thread can acknowledge an in-flight cancellation
+                // while its finish call is joining. It cannot change task metrics.
                 BackendEvent::CancelReceived => {}
             }
             return None;

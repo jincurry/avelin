@@ -1,4 +1,4 @@
-//! M0 local-only, current-user named pipes. Shared by the NSIS plugin.
+//! Local-only, current-user named pipes shared with the Rust worker.
 //! Polling uses PIPE_NOWAIT so no thread can be stranded in native I/O.
 use serde_json::{Value, json};
 use std::{
@@ -255,7 +255,7 @@ impl PipeServer {
         self.accept_checked(timeout, None)
     }
 
-    /// Authorize the launched process before the acknowledgement enables NSIS work.
+    /// Authorize the launched process before the acknowledgement enables deployment work.
     /// Consumes the endpoint; a rejected peer cannot reconnect to this task.
     pub fn accept_from(self, timeout: Duration, expected_pid: u32) -> io::Result<Connection> {
         self.accept_checked(timeout, Some(expected_pid))

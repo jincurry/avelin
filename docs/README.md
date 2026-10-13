@@ -1,12 +1,13 @@
 # Avelin 文档
 
-当前提供默认 NSIS 后端和可选 Rust 原生引擎。两者共享配置、品牌界面和任务入口；Rust 包使用 `build --engine rust`，从源码构建及真实进程验收见开发指南。
+当前仅使用 Rust 原生引擎。CLI 的 `build` 将配置、品牌资源及应用发布目录打包为单个 Setup；源码构建与真实进程验收见开发指南。
 
 | 文档 | 内容 |
 |---|---|
-| [接入指南](getting-started.md) | 用发布目录、TOML 和品牌资源生成 NSIS 或 Rust Setup |
-| [CLI 参数](cli.md) | init/check/build、后端选择、组件定位、诊断与覆盖保护 |
+| [接入指南](getting-started.md) | 用发布目录、TOML 和品牌资源生成 Rust Setup |
+| [CLI 参数](cli.md) | init/check/build、组件定位、诊断与覆盖保护 |
 | [兼容约定](compatibility.md) | 支持范围、升级、卸载、退出码与恢复边界 |
+| [恢复与修复](maintenance.md) | 中断恢复、同版本修复、冲突保留与备份 |
 | [开发指南](development.md) | 从新克隆准备环境、检查、构建与 CI |
 | [架构](architecture.md) | 代码职责、执行路径与状态模型 |
 | [模型与协议](schemas/README.md) | 本地 JSON Schema 与样例 |

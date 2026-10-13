@@ -10,7 +10,7 @@ from referencing import Registry, Resource
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run", type=Path, help="A completed run-m2.ps1 evidence directory")
+    parser.add_argument("--run", type=Path, help="A historical completed M2 evidence directory")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2] / "docs" / "schemas"
     base = "https://avelin.dev/schemas/m1/"

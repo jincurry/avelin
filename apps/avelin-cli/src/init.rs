@@ -191,7 +191,7 @@ pub fn create(options: Options) -> Result<Value> {
     };
     // A serializer quotes user text as data; no TOML interpolation or templates.
     let toml = toml::to_string_pretty(&config).context("serialize configuration as TOML")?;
-    let (_, manifest) = crate::builder::load_text(&directory, &toml)
+    let (_, manifest) = crate::config::load_text(&directory, &toml)
         .context("init input is invalid; no configuration file was written")?;
     let _output_pins = pin_directories(&directory, true)?;
     create_config(&config_path, toml.as_bytes())?;
@@ -221,7 +221,7 @@ mod tests {
             Options {
                 directory: self.0.clone(),
                 app_id: "dev.avelin.init-fixture".into(),
-                name: "示例 O'Brien \\ 工具".into(),
+                name: "示例 O'Brien \\ 工具 [Preview] = \"Desktop\"".into(),
                 app_version: "1.0.0-preview.1".into(),
                 entry: "app.exe".into(),
                 payload: self.0.join("dist"),
@@ -257,7 +257,7 @@ mod tests {
         let text = fs::read_to_string(&config_path).unwrap();
         let raw: toml::Value = toml::from_str(&text).unwrap();
         assert_eq!(raw["payload"]["directory"].as_str(), Some("dist"));
-        let (_, manifest) = crate::builder::load(&config_path).unwrap();
+        let (_, manifest) = crate::config::load(&config_path).unwrap();
         assert_eq!(manifest.app_name, expected_name);
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(fs::read(fixture.0.join("dist/app.exe")).unwrap(), before);
@@ -272,7 +272,7 @@ mod tests {
         let result = create(options).unwrap();
         assert_eq!(result["payload_path_mode"], "absolute");
         let path = fixture.0.join("external/avelin.toml");
-        crate::builder::load(&path).unwrap();
+        crate::config::load(&path).unwrap();
         let before = fs::read(&path).unwrap();
         let mut options = fixture.options();
         options.directory = fixture.0.join("external");

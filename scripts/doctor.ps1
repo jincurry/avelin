@@ -66,20 +66,6 @@ function Get-FileVersion {
 $rustupPath = Get-CommandPath 'rustup.exe'
 $rustcPath = Get-CommandPath 'rustc.exe'
 $cargoPath = Get-CommandPath 'cargo.exe'
-$nsisPath = Get-CommandPath 'makensis.exe'
-
-if (-not $nsisPath) {
-    foreach ($programRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
-        if ($programRoot) {
-            $nsisCandidate = Join-Path $programRoot 'NSIS\makensis.exe'
-            if (Test-Path -LiteralPath $nsisCandidate -PathType Leaf) {
-                $nsisPath = $nsisCandidate
-                break
-            }
-        }
-    }
-}
-
 # Selecting an already installed toolchain avoids a rustup proxy downloading a
 # toolchain requested by a newly created rust-toolchain.toml in this directory.
 $toolchainProbe = Invoke-ReadOnlyProbe $rustupPath @('toolchain', 'list')
@@ -148,7 +134,6 @@ else {
     $targetProbe = $rustcProbe
 }
 
-$nsisProbe = Invoke-ReadOnlyProbe $nsisPath @('/VERSION')
 $vswherePath = Get-CommandPath 'vswhere.exe'
 if (-not $vswherePath -and ${env:ProgramFiles(x86)}) {
     $vswhereCandidate = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -218,7 +203,6 @@ catch {
 $developmentEvidence = @()
 if ($rustupPath -or $rustcPath -or $cargoPath) { $developmentEvidence += 'Rust development tooling is present.' }
 if ($visualStudio.Count -gt 0 -or $msvcCompilers.Count -gt 0) { $developmentEvidence += 'Visual Studio or MSVC development tooling is present.' }
-if ($nsisPath) { $developmentEvidence += 'NSIS build tooling is present.' }
 if ($sdkInfo) { $developmentEvidence += 'A Windows SDK installation is registered.' }
 
 $report = [ordered]@{
@@ -249,7 +233,6 @@ $report = [ordered]@{
         cargo = $cargoProbe
         installed_targets = $targetProbe
     }
-    nsis = [ordered]@{ path = $nsisPath; version = $nsisProbe }
     msvc = [ordered]@{
         cl_on_path = Get-CommandPath 'cl.exe'
         linker_on_path = Get-CommandPath 'link.exe'
@@ -269,7 +252,6 @@ else {
     Write-Output ("Rust: {0}" -f $rustcProbe.output)
     Write-Output ("Cargo: {0}" -f $cargoProbe.output)
     Write-Output ("Installed targets: {0}" -f ($targetProbe.output -replace '\r?\n', ', '))
-    Write-Output ("NSIS: {0}; path: {1}" -f $nsisProbe.output, $nsisPath)
     foreach ($compiler in $msvcCompilers) {
         Write-Output ("MSVC {0}: {1} ({2})" -f $compiler.target, $compiler.toolset, $compiler.path)
     }

@@ -10,6 +10,7 @@
     "compatibility.md",
     "third-party.md",
     "releasing.md",
+    "maintenance.md",
     "schemas/README.md",
     "schemas/examples/command.json",
     "schemas/examples/events.json",

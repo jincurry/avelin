@@ -1,4 +1,4 @@
-//! Ownership decisions for the coordinator. NSIS/bridge alone mutate managed resources.
+//! Ownership decisions for the coordinator. The Rust worker mutates managed resources.
 use crate::execution_files::PinnedFile;
 use anyhow::{Context, Result, ensure};
 use avelin_core::{
@@ -14,6 +14,20 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
         &left.to_string_lossy().replace('/', "\\"),
         &right.to_string_lossy().replace('/', "\\"),
     )
+}
+
+/// Validate the pinned worker before any process launch or installed-state mutation.
+pub fn validate_backend(backend: &PinnedFile, manifest: &Manifest) -> Result<()> {
+    let (payload, embedded_manifest) = avelin_core::embedded(backend.path())?.context(
+        "only a packaged Rust worker is supported; rebuild with the current developer kit",
+    )?;
+    avelin_core::native_payload::NativePayload::parse(&payload, &embedded_manifest)?;
+    ensure!(
+        hash_bytes(&serde_json::to_vec(&embedded_manifest)?)
+            == hash_bytes(&serde_json::to_vec(manifest)?),
+        "Rust worker manifest differs from the requested task"
+    );
+    Ok(())
 }
 
 fn shell_folder(kind: ShortcutKind) -> Result<PathBuf> {
@@ -329,6 +343,47 @@ mod tests {
             );
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn backend_validation_requires_a_complete_rust_package_bound_to_manifest() {
+        let fixture = Fixture::new();
+        let mut manifest = fixture.manifest();
+        manifest.runtime_sha256 = Some(hash_bytes(b"runtime"));
+        let worker = fixture.0.join("worker.exe");
+        fs::write(&worker, b"inert executable without a native package").unwrap();
+        let input = PinnedFile::open(&worker).unwrap();
+        assert!(validate_backend(&input, &manifest).is_err());
+        drop(input);
+
+        let mut payload = avelin_core::native_payload::MAGIC.to_vec();
+        payload.extend(1u32.to_le_bytes());
+        payload.extend((manifest.files.len() as u32).to_le_bytes());
+        payload.extend(7u64.to_le_bytes());
+        payload.extend(b"runtime");
+        for file in &mut manifest.files {
+            file.size = 3;
+            file.sha256 = hash_bytes(b"abc");
+            payload.extend(3u64.to_le_bytes());
+            payload.extend(b"abc");
+        }
+        let packed_payload = fixture.0.join("payload.bin");
+        fs::write(&packed_payload, &payload).unwrap();
+        let packaged = fixture.0.join("packaged.exe");
+        avelin_core::assemble(&worker, &packed_payload, &manifest, &packaged).unwrap();
+        let input = PinnedFile::open(&packaged).unwrap();
+        validate_backend(&input, &manifest).unwrap();
+        let mut mismatch = manifest.clone();
+        mismatch.app_version = "99.0.0".into();
+        assert!(validate_backend(&input, &mismatch).is_err());
+        drop(input);
+
+        payload[0] ^= 1;
+        fs::write(&packed_payload, payload).unwrap();
+        let invalid = fixture.0.join("invalid.exe");
+        avelin_core::assemble(&worker, &packed_payload, &manifest, &invalid).unwrap();
+        let input = PinnedFile::open(&invalid).unwrap();
+        assert!(validate_backend(&input, &manifest).is_err());
     }
 
     #[test]

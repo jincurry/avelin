@@ -65,6 +65,9 @@ function ReasonCodes($Value) {
         shortcut = '(?i)(shortcut|known.folder|desktop|start.menu)'
         registry = '(?i)(registry|registration)'
         product_lock = '(?i)product.lock'
+        recovery_evidence = '(?i)(recovery|retained.session|transaction.evidence)'
+        user_identity = '(?i)(identity|user.sid|Windows.user)'
+        repair = '(?i)repair'
         resource_conflict = '(?i)(conflict|already exists|existing resource)'
         integrity_mismatch = '(?i)(hash|digest|checksum|signature|mismatch|differs)'
         protocol = '(?i)(protocol|pipe|authenticated|terminal|handshake)'
@@ -83,26 +86,38 @@ $caseNames = @(
     'upgrade-collision', 'modified-replacement', 'modified-selected-shortcut',
     'upgrade-before-commit-restores-a', 'upgrade-b', 'launch-b', 'downgrade',
     'uninstall-b-preserves-user-edits', 'reinstall-collision', 'reinstall-and-direct-uninstall',
-    'nsis-to-rust-before-commit-restores-nsis', 'nsis-to-rust-normal-migration',
     'post-commit-confirmation-loss-preserves-committed-b', 'incomplete-rollback-diagnosis-and-reentry-refusal'
 )
-$commandNames = @('rustup-installed', 'rustc-version', 'rustup-which-rustc', 'rustup-which-cargo', 'rustup-which-rustfmt', 'rust-targets', 'python-version', 'nsis-version', 'fmt', 'source-tests', 'bridge-tests', 'host-release', 'bridge-release', 'collect-licenses', 'verify-licenses', 'package', 'verify-extracted-kit', 'rust-lifecycle', 'rust-interruption', 'verify-kit-after-acceptance')
-$processNames = @($caseNames) + @('upgrade-before-commit', 'uninstall-b', 'reinstall-b', 'final-uninstall-bootstrap', 'migration-install-a', 'migration-before-commit', 'migration-upgrade-b', 'migration-uninstall-b', 'after-commit-install', 'after-commit-upgrade', 'after-commit-uninstall', 'rollback-install', 'rollback-upgrade', 'rollback-reject-reentry', 'after-commit-diagnose', 'rollback-diagnose')
-foreach ($label in @('native-a', 'native-b', 'migration-nsis-a', 'migration-rust-b', 'after-commit-a', 'after-commit-b', 'rollback-a', 'rollback-b')) {
+$commandNames = @('rustup-installed', 'rustc-version', 'rustup-which-rustc', 'rustup-which-cargo', 'rustup-which-rustfmt', 'rust-targets', 'python-version', 'fmt', 'source-tests', 'host-release', 'collect-licenses', 'verify-licenses', 'package', 'verify-extracted-kit', 'rust-lifecycle', 'rust-interruption', 'verify-kit-after-acceptance')
+$processNames = @($caseNames) + @('upgrade-before-commit', 'uninstall-b', 'reinstall-b', 'final-uninstall-bootstrap', 'after-commit-install', 'after-commit-upgrade', 'after-commit-uninstall', 'rollback-install', 'rollback-upgrade', 'rollback-reject-reentry', 'after-commit-diagnose', 'rollback-diagnose')
+foreach ($label in @('native-a', 'native-b', 'after-commit-a', 'after-commit-b', 'rollback-a', 'rollback-b')) {
     $processNames += "check-$label", "build-$label"
 }
 $functionNames = @('Require', 'Full', 'SamePath', 'Inside', 'Hash', 'HashBytes', 'Json', 'Save', 'WriteNew', 'CopyNew', 'Snapshot', 'FileRecord', 'AssertFiles', 'RegistryState', 'ProductSnapshot', 'AssertUnchanged', 'InvokeProcess', 'ReadBytes', 'HashRegion', 'VerifyNativeBundle', 'NewProduct', 'BuildPackage', 'OperationReport', 'VerifyInstalled', 'RejectOperation', 'ArchiveOwned', 'ModifyShortcut', 'UninstallRegistered', 'FindSessionRecords', 'UninstallDirect', 'AddSentinels', 'RecoverableUpgradeFault', 'DiagnoseReadOnly', 'ReadJournal', 'VerifyPartialInstallCleanup', 'UnknownUpgradeFixture', '<ScriptBlock>')
+$maintenanceCases = @(
+    'recover-install-after-first-publish', 'recover-install-after-commit',
+    'recover-upgrade-after-first-publish', 'recover-upgrade-after-commit',
+    'recover-uninstall-after-first-remove', 'recover-uninstall-after-commit',
+    'recover-cli-check-read-only', 'recover-reject-foreign-user', 'recover-reject-tampered-evidence',
+    'recover-preserves-post-interruption-edit', 'repair-reject-pending-recovery', 'recover-interruption-retains-evidence',
+    'repair-missing-resources-preserves-modified', 'repair-reject-wrong-manifest', 'repair-reject-wrong-version',
+    'repair-explicit-overwrite-keeps-backup', 'repair-repeat-is-safe'
+)
+$commandNames += 'rust-maintenance'
+$functionNames += 'Pass', 'NewCase', 'Operation', 'UninstallArguments', 'WaitMaintenancePause', 'StopPausedBackend', 'Recover', 'AssertUnchangedState', 'LiveIdentitySnapshot', 'RecoveryCases', 'ShortcutSnapshot', 'RepairEvidence', 'RepairCases', 'StartFixtureProcess', 'FinishFixtureProcess', 'InvokeFixtureProcess', 'VerifyVersion', 'RegistrySnapshot', 'SameSnapshot'
 $report = ReadJson 'summary.json'
 $lifecycle = ReadJson 'lifecycle/summary.json'
 $interruption = ReadJson 'interruption/summary.json'
+$maintenance = ReadJson 'maintenance/summary.json'
 $package = ReadJson 'package/packaging-verification.json'
 $public = [ordered]@{
-    schema_version = 2; status = 'FAILED'; commit = $Commit; runner = 'windows-2025'; engine = 'rust'
-    lifecycle_case_count = 0; interruption_case_count = 0; migration_required = $true
+    schema_version = 4; status = 'FAILED'; commit = $Commit; runner = 'windows-2025'; engine = 'rust'
+    lifecycle_case_count = 0; interruption_case_count = 0; maintenance_case_count = 0
     package_sha256 = $null; failed_command = $null; last_command = $null; last_command_status = $null
     completed_commands = 0; failure_category = 'preparation_or_invocation_failed'
     error_codes = @(ReasonCodes $report['failure']); user_shell_folders = @()
     lifecycle = [ordered]@{ status = $null; completed_cases = @(); next_uncompleted_case = $null; error_codes = @(ReasonCodes $lifecycle['failure']); failure_trace = @(); shortcut_checks = @(); last_process = $null; last_task = $null }
+    maintenance = [ordered]@{ status = $null; completed_cases = @(); error_codes = @(ReasonCodes $maintenance['failure']); failure_trace = @(); last_process = $null; last_task = $null }
 }
 if ($ValidationExitCode -eq 0 -and $report['status'] -ceq 'PASSED') { $public.status = 'PASSED'; $public.failure_category = $null }
 elseif ($report.Count) { $public.failure_category = 'verification_failed_after_command' }
@@ -133,7 +148,7 @@ foreach ($trace in @($lifecycle['failure_trace'])) {
     if ($name -and $line -gt 0 -and $line -lt 10000) { $public.lifecycle.failure_trace += @{ function = $name; line = $line } }
 }
 $shortcutFields = @('target_matches', 'arguments_empty', 'working_directory_matches', 'target_empty', 'working_directory_empty', 'target_exists', 'working_directory_exists', 'target_contains_question_mark', 'working_directory_contains_question_mark', 'target_has_short_component')
-foreach ($label in @('installed-a', 'upgraded-b', 'reinstalled-b', 'migration-installed-a', 'migration-upgraded-b', 'after-commit-installed', 'after-commit-installed-b', 'rollback-installed')) {
+foreach ($label in @('installed-a', 'upgraded-b', 'reinstalled-b', 'after-commit-installed', 'after-commit-installed-b', 'rollback-installed')) {
     foreach ($kind in @('desktop', 'start_menu')) {
         $name = "$label-$kind"
         $check = ReadJson "lifecycle/$name.shortcut-check.json"
@@ -179,6 +194,38 @@ foreach ($point in @('prepared', 'after-first-publish', 'after-commit')) {
         $label = "$point-kill-$victim"
         if (@($interruption['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['label'] -ceq $label -and $_['status'] -ceq 'PASSED' }).Count -eq 1) { $public.interruption_case_count++ }
     }
+}
+$public.maintenance.status = SelectEnum $maintenance['status'] @('RUNNING', 'PASSED', 'FAILED')
+foreach ($name in $maintenanceCases) {
+    if (@($maintenance['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['label'] -ceq $name -and $_['status'] -ceq 'PASSED' }).Count -eq 1) { $public.maintenance.completed_cases += $name }
+}
+$public.maintenance_case_count = $public.maintenance.completed_cases.Count
+foreach ($trace in @($maintenance['failure_trace'])) {
+    if ($trace -isnot [Collections.IDictionary]) { continue }
+    $name = SelectEnum $trace['function'] $functionNames; $line = Number $trace['line']
+    if ($name -and $line -gt 0 -and $line -lt 10000) { $public.maintenance.failure_trace += @{ function = $name; line = $line } }
+}
+$maintenanceProcesses = @('build-a', 'build-b', 'install-a', 'interrupted', 'reject-active', 'check', 'cli-recovery-check', 'reject-foreign-user', 'reject-tampered-evidence', 'reject-post-interruption-edit', 'repair-reject-pending', 'interrupted-recovery', 'apply', 'apply-again', 'cleanup', 'build-different', 'build-different-manifest', 'build-newer', 'repair-preserve', 'repair-reject-wrong-manifest', 'repair-reject-wrong-version', 'repair-overwrite', 'repair-repeat')
+$latestMaintenanceProcess = $null; $latestMaintenanceTask = $null
+foreach ($case in @($maintenanceCases[0..5]) + @('repair')) {
+    foreach ($name in $maintenanceProcesses) {
+        $relative = "maintenance/$case/$name"
+        $file = SafeFile "$relative.process.json"
+        if ($file -and ($null -eq $latestMaintenanceProcess -or $file.LastWriteTimeUtc -gt $latestMaintenanceProcess.file.LastWriteTimeUtc)) { $latestMaintenanceProcess = @{ name = $name; case = $case; relative = $relative; file = $file } }
+        $file = SafeFile "$relative.report.json"
+        if ($file -and ($null -eq $latestMaintenanceTask -or $file.LastWriteTimeUtc -gt $latestMaintenanceTask.file.LastWriteTimeUtc)) { $latestMaintenanceTask = @{ name = $name; case = $case; relative = $relative; file = $file } }
+    }
+}
+if ($latestMaintenanceProcess) {
+    $latest = $latestMaintenanceProcess; $process = ReadJson "$($latest.relative).process.json"
+    $stderrCodes = @(); $stderr = SafeFile "$($latest.relative).stderr.log"
+    if ($stderr) { $stderrCodes = @(ReasonCodes (Get-Content -LiteralPath $stderr.FullName -TotalCount 8 | Out-String)) }
+    $public.maintenance.last_process = @{ name = $latest.name; case = $latest.case; status = SelectEnum $process['status'] @('RUNNING', 'EXITED'); exit_code = Number $process['exit_code']; stderr_codes = $stderrCodes }
+}
+if ($latestMaintenanceTask) {
+    $latest = $latestMaintenanceTask; $task = ReadJson "$($latest.relative).report.json"
+    $diagnostic = if ($task['diagnostic'] -is [Collections.IDictionary]) { $task['diagnostic'] } else { @{} }
+    $public.maintenance.last_task = @{ name = $latest.name; case = $latest.case; result = SelectEnum $task['result'] @('Succeeded', 'Failed', 'Cancelled', 'Unknown', 'NotStarted'); coordinator_exit_code = Number $task['coordinator_exit_code']; maintenance_status = SelectEnum $task['maintenance_status'] @('RecoveryChecked', 'RecoveryComplete', 'RepairComplete', 'RepairPreservedConflicts'); reason_codes = @(ReasonCodes $diagnostic['reason']) }
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $output) { throw 'Public output file already exists.' }

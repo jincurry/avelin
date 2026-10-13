@@ -2,7 +2,7 @@
 
 ## 源码仓库
 
-仓库提供默认 NSIS 与可选 Rust 引擎的预览源码，包含 MIT、贡献说明、公开文档和源码检查。源码提交、工具包生成和公开 Release 分别记录版本与验证结果。
+仓库提供 Rust 原生引擎的预览源码，包含 MIT、贡献说明、公开文档和源码检查。源码提交、工具包生成和公开 Release 分别记录版本与验证结果。
 
 提交前：
 
@@ -21,18 +21,18 @@ git diff --cached --stat
 
 已有本地开发包不能直接视为公开 Release 附件。完整构建证据可能含构建路径、Windows 用户 SID、机器信息和原始 Cargo 元数据；上传前检查实际附件内容。
 
-1. 从明确的源码版本构建配套 runtime、CLI、样例及所选后端：Rust 使用 x64 worker，NSIS 使用 x86 bridge。
+1. 从明确的源码版本构建配套 x64 runtime、CLI、样例和 Rust worker。
 2. 用 `scripts/collect-third-party.py` 收集锁定依赖和工具许可材料，并核验输出。
-3. Rust 使用 `scripts/package-rust-devkit.ps1`，NSIS 使用 `scripts/package-devkit.ps1`；公共文档从明确清单复制，并附项目 LICENSE/NOTICE。
+3. 使用 `scripts/package-rust-devkit.ps1`；公共文档从明确清单复制，并附项目 LICENSE/NOTICE。
 4. 校验 HASHES 与 ZIP 摘要，在新测试目录验证安装、升级、启动和卸载。
 5. 复核附件中的个人信息、第三方声明、发行身份和签名安排，再发布预览版本。
 
 ### Rust 工具包
 
-在已构建 Release 组件的仓库中，先生成当前锁文件的第三方材料。现有收集器同时记录两个后端，因此这一步仍需要 NSIS 3.12；生成后的 Rust 工具包及其构包命令不需要 NSIS。
+在已构建 Release 组件的仓库中，先生成当前锁文件的第三方材料。收集器只记录 Windows x64 依赖，不需要额外安装器编译器。
 
 ```powershell
-python scripts/collect-third-party.py --project-root . --nsis-root 'C:/Program Files (x86)/NSIS' --output target/rust-licenses-new
+python scripts/collect-third-party.py --project-root . --output target/rust-licenses-new
 pwsh -NoProfile -File scripts/package-rust-devkit.ps1 `
   -CliPath target/release/avelin-cli.exe `
   -RuntimePath target/release/avelin-app.exe `
@@ -51,7 +51,7 @@ pwsh -NoProfile -File scripts/Verify-RustDevKit.ps1 `
 
 ### 完整验收入口
 
-Rust 使用 `scripts/ci-rust-windows.ps1`，NSIS 保留 `scripts/ci-windows.ps1`，见[开发指南](development.md#维护者完整工具包验收)。Rust 入口从源码测试与构建开始，采集依赖材料、打包并解压校验，再使用解压组件运行 19 项生命周期和 6 项中断验收。
+使用 `scripts/ci-rust-windows.ps1`，见[开发指南](development.md#维护者完整工具包验收)。Rust 入口从源码测试与构建开始，采集依赖材料、打包并解压校验，再使用解压组件运行 17 项生命周期、6 项中断及 17 项恢复/修复验收。
 
 `.github/workflows/rust-windows.yml` 提供 GitHub 托管 Windows 入口；`.github/workflows/windows.yml` 保留手动自托管入口。完整本机日志可能包含路径、SID 和测试资源，不作为公开附件自动上传；云端执行结果以对应源码提交的实际运行状态为准。自托管 runner 的完整证据需在后续 checkout 清理工作目录前自行归档。
 
@@ -59,4 +59,4 @@ Rust 使用 `scripts/ci-rust-windows.ps1`，NSIS 保留 `scripts/ci-windows.ps1`
 
 CLI 预览版本是 `0.1.0-preview.1`；其他 crate 内部版本不代表独立公开包版本，当前均 `publish = false`。schema 和被安装应用版本分开管理。不要按同名文件混搭组件，也不要把构建成功记为安装通过。
 
-MIT 不替第三方文件重新授权。NSIS 源码、图标和二进制分发材料见[第三方说明](third-party.md)。保留未验证项与已知限制，按实际结果写发布说明。
+MIT 不替第三方文件重新授权。依赖源码、图标和二进制分发材料见[第三方说明](third-party.md)。保留未验证项与已知限制，按实际结果写发布说明。

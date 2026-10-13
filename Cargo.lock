@@ -577,6 +577,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "avelin-core",
+ "avelin-engine",
  "avelin-ui",
  "clap",
  "log",
@@ -623,16 +624,6 @@ dependencies = [
  "sha2 0.10.9",
  "uuid",
  "windows 0.61.3",
-]
-
-[[package]]
-name = "avelin-nsis-bridge"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "hex",
- "serde_json",
- "sha2 0.10.9",
 ]
 
 [[package]]

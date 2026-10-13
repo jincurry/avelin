@@ -239,6 +239,18 @@ fn run_inner(
 }
 
 fn window_title(options: &UiOptions) -> String {
+    if matches!(options.operation, Operation::Repair | Operation::Recover) {
+        return format!(
+            "{} · {}",
+            options.app_name,
+            match (options.operation, options.locale) {
+                (Operation::Repair, Locale::Chinese) => "修复",
+                (Operation::Repair, Locale::English) => "Repair",
+                (_, Locale::Chinese) => "恢复未完成的操作",
+                (_, Locale::English) => "Recover interrupted operation",
+            }
+        );
+    }
     options
         .presentation
         .text(
@@ -247,6 +259,7 @@ fn window_title(options: &UiOptions) -> String {
                 Operation::Uninstall => "window.uninstall_title",
                 Operation::Upgrade => "window.upgrade_title",
                 Operation::Install => "window.title",
+                Operation::Repair | Operation::Recover => unreachable!("handled maintenance title"),
             },
             &[("app_name", &options.app_name)],
         )
@@ -677,6 +690,40 @@ impl InstallerView {
         self.options.operation == Operation::Upgrade
     }
 
+    fn repair(&self) -> bool {
+        self.options.operation == Operation::Repair
+    }
+
+    fn recover(&self) -> bool {
+        self.options.operation == Operation::Recover
+    }
+
+    fn maintenance(&self) -> bool {
+        self.repair() || self.recover()
+    }
+
+    fn localized(&self, chinese: &str, english: &str) -> String {
+        match self.options.locale {
+            Locale::Chinese => chinese,
+            Locale::English => english,
+        }
+        .to_owned()
+    }
+
+    fn repair_policy(&self) -> String {
+        if self.options.repair_overwrite {
+            self.localized(
+                "已显式选择恢复原版：改过的受管文件会先备份，再恢复为此安装包的版本。用户新增文件保持不变。",
+                "Original-package restoration was explicitly selected: changed managed files are backed up before replacement. Added user files remain unchanged.",
+            )
+        } else {
+            self.localized(
+                "改过的文件会保留，并在结果中列出未修复项。不会将修改直接视为损坏。",
+                "Changed files are preserved and listed as unresolved findings. A modification is not treated as damage.",
+            )
+        }
+    }
+
     fn fixed_directory(&self) -> bool {
         self.options.operation != Operation::Install
     }
@@ -698,7 +745,7 @@ impl InstallerView {
     }
 
     fn shows_launch(&self) -> bool {
-        !self.demo() && !self.uninstall() && self.phase() == UiPhase::Succeeded
+        !self.demo() && !self.uninstall() && !self.recover() && self.phase() == UiPhase::Succeeded
     }
 
     fn launch(&mut self, cx: &mut Context<Self>) {
@@ -836,8 +883,8 @@ impl InstallerView {
             } else {
                 PathBuf::from(directory)
             },
-            desktop_shortcut: !self.uninstall() && self.desktop,
-            start_menu_shortcut: !self.uninstall() && self.start_menu,
+            desktop_shortcut: !self.uninstall() && !self.maintenance() && self.desktop,
+            start_menu_shortcut: !self.uninstall() && !self.maintenance() && self.start_menu,
         };
         if !self.state.request_start(self.accepted) {
             return;
@@ -935,6 +982,20 @@ impl InstallerView {
     }
 
     fn title(&self) -> String {
+        if self.maintenance() {
+            let pair = match (self.repair(), self.phase()) {
+                (true, UiPhase::Ready) => ("检查与修复", "Inspect and repair"),
+                (true, UiPhase::Succeeded) => ("修复流程完成", "Repair finished"),
+                (true, UiPhase::Failed) => ("未能完成修复", "Could not repair"),
+                (false, UiPhase::Ready) => ("发现未完成的操作", "Interrupted operation found"),
+                (false, UiPhase::Succeeded) => ("恢复完成", "Recovery completed"),
+                (false, UiPhase::Failed) => ("未能完成恢复", "Could not recover"),
+                (_, UiPhase::Unknown) => ("结果待确认", "Result unconfirmed"),
+                (true, _) => ("正在修复", "Repairing"),
+                (false, _) => ("正在恢复", "Recovering"),
+            };
+            return self.localized(pair.0, pair.1);
+        }
         if self.upgrade() {
             return self.text(match self.phase() {
                 UiPhase::Ready => "phase.upgrade_ready",
@@ -973,6 +1034,25 @@ impl InstallerView {
     }
 
     fn description(&self) -> String {
+        if self.maintenance() {
+            if self.phase() == UiPhase::Ready {
+                return if self.repair() {
+                    self.localized(
+                        "补齐缺失的受管文件、快捷方式和应用登记，保留其他用户内容。请先查看检查结果。",
+                        "Restore missing managed files, shortcuts and application registration. Preserve other user content. Review the findings first.",
+                    )
+                } else {
+                    self.localized(
+                        "检查已退出任务的记录。尚未提交时恢复原状；已提交时核对结果。确认后才执行恢复。",
+                        "Inspect the exited task. Restore the previous state before commit, or verify an already committed result. Recovery requires confirmation.",
+                    )
+                };
+            }
+            return self.localized(
+                "以执行报告为准；恢复或修复结果未确认前，请保留事务证据。",
+                "Use the execution report to confirm the result. Retain transaction evidence until recovery or repair is confirmed.",
+            );
+        }
         if self.demo() {
             return self.text("description.demo");
         }
@@ -1011,6 +1091,9 @@ impl InstallerView {
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.maintenance() {
+            return self.render_maintenance_confirmation(cx);
+        }
         if self.uninstall() {
             return self.render_uninstall_confirmation(cx);
         }
@@ -1301,6 +1384,71 @@ impl InstallerView {
             .into_any_element()
     }
 
+    fn render_maintenance_confirmation(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(px(24.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.title()),
+            )
+            .child(div().text_sm().child(self.description()))
+            .child(
+                div()
+                    .id("maintenance-directory")
+                    .text_sm()
+                    .whitespace_normal()
+                    .aria_label(self.localized("固定安装目录", "Fixed installation directory"))
+                    .child(self.options.install_dir.to_string_lossy().into_owned()),
+            )
+            .children(
+                self.options
+                    .maintenance_details
+                    .iter()
+                    .map(|(chinese, english)| {
+                        div()
+                            .text_sm()
+                            .whitespace_normal()
+                            .child(self.localized(chinese, english))
+                    }),
+            )
+            .when(self.repair(), |container| {
+                container.child(
+                    div()
+                        .id("repair-policy")
+                        .text_sm()
+                        .whitespace_normal()
+                        .child(self.repair_policy()),
+                )
+            })
+            .child(
+                Checkbox::new("consent")
+                    .label(if self.repair() {
+                        self.localized(
+                            "我已查看检查结果，确认按上述方式修复",
+                            "I reviewed the findings and confirm this repair",
+                        )
+                    } else {
+                        self.localized(
+                            "我已查看检查结果，确认恢复此未完成的操作",
+                            "I reviewed the findings and confirm recovery",
+                        )
+                    })
+                    .checked(self.accepted)
+                    .disabled(self.phase() != UiPhase::Ready)
+                    .on_change(cx.listener(|view, checked, _, cx| {
+                        if view.phase() == UiPhase::Ready {
+                            view.accepted = *checked;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn render_uninstall_confirmation(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex()
@@ -1568,6 +1716,8 @@ impl Render for InstallerView {
                                 self.text("footer.uninstall")
                             } else if self.upgrade() {
                                 self.text("footer.upgrade")
+                            } else if self.maintenance() {
+                                self.localized("安装维护", "Installation maintenance")
                             } else {
                                 self.text("footer.install")
                             })),
@@ -1590,6 +1740,10 @@ impl Render for InstallerView {
                                             self.text("action.uninstall")
                                         } else if self.upgrade() {
                                             self.text("action.upgrade")
+                                        } else if self.repair() {
+                                            self.localized("修复", "Repair")
+                                        } else if self.recover() {
+                                            self.localized("恢复", "Recover")
                                         } else {
                                             self.text("action.install")
                                         })

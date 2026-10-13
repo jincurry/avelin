@@ -1,4 +1,4 @@
-//! Upgrade preflight and evidence. NSIS owns deployment, backup and restoration.
+//! Upgrade preflight and evidence. The Rust worker owns deployment and restoration.
 use crate::{execution_files::PinnedFile, resources};
 use anyhow::{Context, Result, ensure};
 use avelin_core::{Manifest, RECEIPT_NAME, Receipt, ShortcutKind, ShortcutRecord, reject_reparse};
@@ -270,6 +270,9 @@ pub fn prepare(
     old.validate()?;
     let manifest_file_sha256 = input.sha256()?;
     let (receipt, receipt_sha256) = resources::read_receipt_with_hash(&old, target, sid)?;
+    let worker = PinnedFile::open(&target.join("uninstall.exe"))?;
+    resources::validate_backend(&worker, &old)
+        .context("upgrade requires an existing Rust installation; uninstall the older product with its original installer first")?;
     ensure!(
         manifest.app_id == old.app_id,
         "upgrade product identity conflicts with the existing installation"
@@ -665,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_commands_match_the_nsis_native_path_spelling() {
+    fn registration_commands_use_native_windows_path_spelling() {
         let target = Path::new(r"C:\Apps\Nimbus 笔记");
         assert_eq!(
             command(target, false),

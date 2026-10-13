@@ -46,19 +46,14 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component rust-docs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup target add --toolchain stable x86_64-pc-windows-msvc i686-pc-windows-msvc
+          rustup target add --toolchain stable x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The offline license collector resolves workspace metadata, including
           # dependencies omitted by the selected build/test roots. Fetch the
           # complete locked graph before entering its offline-only phase.
           cargo +stable fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Prepare pinned portable NSIS migration compiler
-        run: |
-          $prepared = ./scripts/prepare-windows-ci.ps1 -OutputDirectory target/ci-nsis | ConvertFrom-Json
-          if ($prepared.status -cne 'PASSED') { throw 'NSIS preparation did not pass.' }
-          "AVELIN_NSIS_ROOT=$($prepared.nsis_root)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build Rust kit and validate all lifecycle and interruption cases
+      - name: Build Rust kit and validate lifecycle, interruption and maintenance cases
         run: |
           $runDirectory = "target/rust-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $privateDirectory = Join-Path $env:GITHUB_WORKSPACE 'target/rust-ci-private'
@@ -68,7 +63,7 @@ jobs:
           try {
             $PSNativeCommandUseErrorActionPreference = $false
             & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -File './scripts/ci-rust-windows.ps1' `
-              -OutputDirectory $runDirectory -NsisRoot $env:AVELIN_NSIS_ROOT `
+              -OutputDirectory $runDirectory `
               -RustToolchain stable -CargoTargetDirectory (Join-Path $env:GITHUB_WORKSPACE 'target') `
               *> $privateLog
             if ($null -ne $LASTEXITCODE) { $validationExitCode = $LASTEXITCODE }
@@ -78,7 +73,7 @@ jobs:
           "AVELIN_RUST_CI_EXIT=$validationExitCode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AVELIN_RUST_CI_REPORT=$runDirectory/summary.json" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($validationExitCode -eq 0) {
-            Write-Output 'Rust preview build, packaging, 19 lifecycle cases and 6 interruption cases passed.'
+            Write-Output 'Rust build, packaging, 17 lifecycle, 6 interruption and 17 maintenance cases passed.'
           } else {
             Write-Output "Rust preview validation failed (exit code $validationExitCode). See the public summary for the failing command."
           }
@@ -93,7 +88,7 @@ jobs:
             -OutputPath target/rust-ci-public/summary.json -Commit '${{ github.sha }}' `
             -ValidationExitCode $exitCode | ConvertFrom-Json
           $public | ConvertTo-Json -Depth 12 | Write-Output
-          "## Rust preview validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "## Rust validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count); maintenance cases: $($public.maintenance_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Preserve public validation summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

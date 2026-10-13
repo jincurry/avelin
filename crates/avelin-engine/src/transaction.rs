@@ -12,12 +12,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MARKER: &str = ".avelin/upgrade-state.json";
-fn text(path: &Path) -> Result<&str> {
+pub(crate) const MARKER: &str = ".avelin/upgrade-state.json";
+pub(crate) fn text(path: &Path) -> Result<&str> {
     path.to_str().context("deployment path is not Unicode")
 }
 #[derive(Debug, Clone)]
-struct WindowsPath(Vec<u16>);
+pub(crate) struct WindowsPath(Vec<u16>);
 impl Ord for WindowsPath {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         #[link(name = "kernel32")]
@@ -58,7 +58,7 @@ impl PartialEq for WindowsPath {
     }
 }
 impl Eq for WindowsPath {}
-fn key(path: &Path) -> WindowsPath {
+pub(crate) fn key(path: &Path) -> WindowsPath {
     WindowsPath(
         path.to_string_lossy()
             .replace('/', "\\")
@@ -66,7 +66,7 @@ fn key(path: &Path) -> WindowsPath {
             .collect(),
     )
 }
-fn inside(path: &Path, parent: &Path) -> bool {
+pub(crate) fn inside(path: &Path, parent: &Path) -> bool {
     let path: Vec<_> = path.components().collect();
     let parent: Vec<_> = parent.components().collect();
     path.len() >= parent.len()
@@ -75,13 +75,13 @@ fn inside(path: &Path, parent: &Path) -> bool {
             .zip(parent.iter())
             .all(|(a, b)| key(Path::new(a.as_os_str())) == key(Path::new(b.as_os_str())))
 }
-fn read(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
     owned::read_bytes(text(path)?, 32 * 1024 * 1024)
 }
-fn digest(path: &Path) -> Result<String> {
+pub(crate) fn digest(path: &Path) -> Result<String> {
     owned::hash_file(text(path)?)
 }
-fn confirm(path: &Path, expected: &str) -> Result<()> {
+pub(crate) fn confirm(path: &Path, expected: &str) -> Result<()> {
     ensure!(
         digest(path)?.eq_ignore_ascii_case(expected),
         "owned resource changed: {}",
@@ -92,10 +92,10 @@ fn confirm(path: &Path, expected: &str) -> Result<()> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Resource {
-    path: PathBuf,
-    sha256: String,
-    size: u64,
+pub(crate) struct Resource {
+    pub path: PathBuf,
+    pub sha256: String,
+    pub size: u64,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,13 +106,17 @@ struct Inventory {
     preserved: Vec<Resource>,
     registration: Registration,
 }
-struct Staged {
-    source: PathBuf,
-    resource: Resource,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Staged {
+    pub source: PathBuf,
+    pub resource: Resource,
 }
-struct Backup {
-    source: PathBuf,
-    resource: Resource,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Backup {
+    pub source: PathBuf,
+    pub resource: Resource,
 }
 struct Prepared {
     stage: Vec<Staged>,
@@ -121,6 +125,7 @@ struct Prepared {
     registration: Option<Registration>,
     next_registration: Option<Registration>,
     shortcut_evidence: Vec<u8>,
+    repair_preserved: Vec<String>,
 }
 
 fn validate_receipt(
@@ -233,7 +238,10 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
     }
     if let Some(point) = request.pause_point {
         ensure!(
-            matches!(point, "prepared" | "after-first-publish" | "after-commit"),
+            matches!(
+                point,
+                "prepared" | "after-first-publish" | "after-first-remove" | "after-commit"
+            ),
             "unknown native pause point"
         );
     }
@@ -242,6 +250,8 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
             request.receipt.task_id == plan.task_id && request.receipt.uninstaller_sha256.is_none(),
             "invalid new receipt candidate"
         );
+    }
+    if plan.operation != Operation::Uninstall {
         let payload = request.payload.context("install requires native payload")?;
         ensure!(
             payload.files.len() == request.manifest.files.len(),
@@ -463,6 +473,36 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             system::verify_registration(&request.plan.app_id, Some(&expected))?;
             Some(expected)
         }
+        Operation::Repair => {
+            let original = read(&request.session_dir.join("prior-receipt.json"))?;
+            let installed = read(&root.join(RECEIPT_NAME))?;
+            ensure!(
+                original == installed,
+                "repair receipt changed after confirmation"
+            );
+            let receipt: Receipt = serde_json::from_slice(&original)?;
+            validate_receipt(&receipt, request.manifest, request)?;
+            validate_repair_candidate(&receipt, request.receipt, request.plan)?;
+            ensure!(
+                receipt.uninstaller_sha256.as_deref() == Some(digest(request.worker_exe)?.as_str()),
+                "repair requires the exact original worker package"
+            );
+            let selected: BTreeSet<_> = receipt.shortcuts.iter().map(|v| v.kind).collect();
+            ensure!(
+                selected.contains(&ShortcutKind::Desktop) == request.plan.desktop_shortcut
+                    && selected.contains(&ShortcutKind::StartMenu)
+                        == request.plan.start_menu_shortcut,
+                "repair must retain the installed shortcut choices"
+            );
+            let expected = Registration::new(request.manifest, root);
+            if system::verify_registration(&request.plan.app_id, Some(&expected)).is_ok() {
+                Some(expected)
+            } else {
+                system::verify_registration(&request.plan.app_id, None)?;
+                None
+            }
+        }
+        Operation::Recover => bail!("recovery uses its separate evidence-bound entry point"),
     };
     let next_registration = (request.plan.operation != Operation::Uninstall)
         .then(|| Registration::new(request.manifest, root));
@@ -532,7 +572,20 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                 ShortcutKind::Desktop => "desktop",
                 ShortcutKind::StartMenu => "start_menu",
             };
-            let bytes = system::shortcut_bytes(Path::new(&shortcut.target), root)?;
+            let original = request
+                .receipt
+                .shortcuts
+                .iter()
+                .find(|v| v.kind == shortcut.kind);
+            let bytes = if request.plan.operation == Operation::Repair
+                && Path::new(&shortcut.path).try_exists()?
+                && original.is_some_and(|v| {
+                    digest(Path::new(&shortcut.path)).is_ok_and(|actual| actual == v.sha256)
+                }) {
+                read(Path::new(&shortcut.path))?
+            } else {
+                system::shortcut_bytes(Path::new(&shortcut.target), root)?
+            };
             let hash = add(
                 &format!("{name}.lnk"),
                 PathBuf::from(&shortcut.path),
@@ -540,7 +593,16 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             )?;
             shortcut_evidence.push_str(&format!("{name}_sha256={hash}\r\n"));
             let mut record = shortcut.clone();
-            record.sha256 = hash;
+            record.sha256 = if request.plan.operation == Operation::Repair
+                && !request.repair_overwrite
+                && Path::new(&shortcut.path).try_exists()?
+                && original.is_some_and(|v| {
+                    digest(Path::new(&shortcut.path)).is_ok_and(|actual| actual != v.sha256)
+                }) {
+                original.unwrap().sha256.clone()
+            } else {
+                hash
+            };
             receipt.shortcuts.push(record);
         }
         add(
@@ -559,6 +621,46 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             source: worker_source,
         });
         stage.push(receipt);
+    }
+    let mut repair_preserved = Vec::new();
+    if request.plan.operation == Operation::Repair {
+        let old_receipt_bytes = read(&root.join(RECEIPT_NAME))?;
+        let original_manifest = serde_json::to_vec_pretty(request.manifest)?;
+        let old_receipt: Receipt = serde_json::from_slice(&old_receipt_bytes)?;
+        let allowed = allowed_old(
+            request.manifest,
+            &old_receipt,
+            &old_receipt_bytes,
+            &original_manifest,
+            root,
+        )?;
+        let mut retained = Vec::new();
+        for item in stage {
+            if !item.resource.path.try_exists()? {
+                retained.push(item);
+                continue;
+            }
+            let hash = digest(&item.resource.path)?;
+            let before = Resource {
+                path: item.resource.path.clone(),
+                sha256: hash.clone(),
+                size: fs::metadata(&item.resource.path)?.len(),
+            };
+            let owned_hash = &allowed
+                .get(&key(&item.resource.path))
+                .context("repair resource is outside original ownership")?
+                .1;
+            if hash == item.resource.sha256 {
+                preserved.push(before);
+            } else if hash == *owned_hash || request.repair_overwrite {
+                backup_resources.push(before);
+                retained.push(item);
+            } else {
+                repair_preserved.push(item.resource.path.to_string_lossy().into_owned());
+                preserved.push(before);
+            }
+        }
+        stage = retained;
     }
     let mut backup = Vec::new();
     for (index, item) in backup_resources.into_iter().enumerate() {
@@ -586,6 +688,7 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
         registration,
         next_registration,
         shortcut_evidence: shortcut_evidence.into_bytes(),
+        repair_preserved,
     })
 }
 
@@ -630,16 +733,19 @@ impl Transaction<'_> {
             .record("directory_intent", path, "", "create")?;
         owned::create_directory(text(path)?)?;
         self.directories.push(path.into());
-        self.journal
-            .record("directory_created", path, "", "created")
+        self.journal.record(
+            "directory_created",
+            path,
+            &owned::directory_identity(text(path)?)?,
+            "created",
+        )
     }
     fn marker(&mut self) -> Result<()> {
         let root = &self.request.plan.install_dir;
         self.directory(&root.join(".avelin"))?;
-        let bytes = serde_json::to_vec_pretty(
-            &serde_json::json!({"schema_version":1,"engine":"rust","task_id":self.request.plan.task_id,
-            "app_id":self.request.plan.app_id,"operation":self.request.plan.operation,"installation_id":self.request.receipt.installation_id,
-            "session_dir":self.request.session_dir,"journal":self.journal.path,"notice":"Unfinished native transaction. Preserve the session, backups and marker for diagnosis; never automatically rerun."}),
+        let bytes = crate::recovery::marker_bytes(
+            self.request,
+            &digest(&self.request.session_dir.join("engine-recovery.json"))?,
         )?;
         let path = root.join(MARKER);
         self.journal
@@ -738,6 +844,9 @@ impl Transaction<'_> {
             self.removed.push(index);
             self.journal
                 .record("deleted", &item.path, &item.sha256, &index.to_string())?;
+            if index == 0 {
+                self.pause("after-first-remove", observer)?;
+            }
             if self.request.plan.operation == Operation::Uninstall
                 && payload_paths.contains(&key(&item.path))
             {
@@ -800,11 +909,12 @@ impl Transaction<'_> {
             "",
             "replace_owned",
         )?;
-        system::replace_registration(
+        system::replace_registration_observed(
             &self.request.plan.app_id,
             self.prepared.registration.as_ref(),
             self.prepared.next_registration.as_ref(),
             &mut self.registration_change,
+            Some(crate::recovery::registry_observer(self.request.session_dir)),
         )?;
         self.journal.record(
             "registry_written",
@@ -838,35 +948,43 @@ impl Transaction<'_> {
             return Err(Cancelled.into());
         }
         if self.request.plan.operation != Operation::Uninstall {
-            let receipt = self
+            if let Some(receipt) = self
                 .prepared
                 .stage
                 .iter()
                 .find(|v| v.resource.path == self.request.plan.install_dir.join(RECEIPT_NAME))
-                .context("prepared receipt missing")?;
-            self.journal.record(
-                "publish_intent",
-                &receipt.resource.path,
-                &receipt.resource.sha256,
-                "commit_receipt",
-            )?;
-            owned::publish(
-                text(&receipt.source)?,
-                text(&receipt.resource.path)?,
-                &receipt.resource.sha256,
-            )?;
-            self.created.push(receipt.resource.clone());
-            self.journal.record(
-                "published",
-                &receipt.resource.path,
-                &receipt.resource.sha256,
-                "committed_receipt",
-            )?;
-            confirm(&receipt.resource.path, &receipt.resource.sha256)?;
+            {
+                self.journal.record(
+                    "publish_intent",
+                    &receipt.resource.path,
+                    &receipt.resource.sha256,
+                    "commit_receipt",
+                )?;
+                owned::publish(
+                    text(&receipt.source)?,
+                    text(&receipt.resource.path)?,
+                    &receipt.resource.sha256,
+                )?;
+                self.created.push(receipt.resource.clone());
+                self.journal.record(
+                    "published",
+                    &receipt.resource.path,
+                    &receipt.resource.sha256,
+                    "committed_receipt",
+                )?;
+                confirm(&receipt.resource.path, &receipt.resource.sha256)?;
+            }
         }
+        owned::write_new_bytes(
+            text(&self.request.session_dir.join("engine-commit.json"))?,
+            &crate::recovery::commit_bytes(
+                &self.request.plan.task_id,
+                &digest(&self.request.session_dir.join("engine-recovery.json"))?,
+            )?,
+        )?;
+        self.committed = true;
         self.journal
             .record("committed", &self.request.plan.install_dir, "", "verified")?;
-        self.committed = true;
         self.pause("after-commit", observer)?;
         self.clear_marker()?;
         self.remove_empty_directories();
@@ -991,6 +1109,76 @@ impl std::fmt::Display for Cancelled {
 }
 impl std::error::Error for Cancelled {}
 
+pub(crate) fn validate_repair_candidate(
+    previous: &Receipt,
+    candidate: &Receipt,
+    plan: &avelin_core::InstallPlan,
+) -> Result<()> {
+    ensure!(
+        candidate.task_id == plan.task_id
+            && candidate.task_id != previous.task_id
+            && candidate.commit_id != previous.commit_id
+            && candidate.previous_commit_id.as_deref() == Some(previous.commit_id.as_str()),
+        "repair requires a fresh task and commit linked to the original receipt"
+    );
+    let mut expected = previous.clone();
+    expected.task_id = plan.task_id.clone();
+    expected.commit_id = candidate.commit_id.clone();
+    expected.previous_commit_id = Some(previous.commit_id.clone());
+    expected.uninstaller_sha256 = None;
+    ensure!(
+        serde_json::to_value(candidate)? == serde_json::to_value(expected)?,
+        "repair candidate changed the original package or installation ownership"
+    );
+    Ok(())
+}
+
+pub(crate) fn verify_repair(
+    manifest: &Manifest,
+    target: &Path,
+    user_sid: &str,
+) -> Result<crate::RepairReport> {
+    manifest.validate()?;
+    avelin_core::install_root(target)?;
+    ensure!(
+        !target.join(MARKER).try_exists()?,
+        "an unfinished transaction requires recovery"
+    );
+    let bytes = read(&target.join(RECEIPT_NAME))?;
+    let receipt: Receipt = serde_json::from_slice(&bytes)?;
+    ensure!(
+        receipt.app_id == manifest.app_id
+            && receipt.app_version == manifest.app_version
+            && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
+            && receipt.files == manifest.files
+            && receipt.user_sid == user_sid
+            && key(Path::new(&receipt.install_dir)) == key(target),
+        "repair verification belongs to another installation or package"
+    );
+    let expected_manifest = serde_json::to_vec_pretty(manifest)?;
+    let allowed = allowed_old(manifest, &receipt, &bytes, &expected_manifest, target)?;
+    let mut preserved = Vec::new();
+    for (_, (path, hash)) in allowed {
+        ensure!(
+            path.try_exists()?,
+            "repair left an owned resource missing: {}",
+            path.display()
+        );
+        if digest(&path)? != hash {
+            preserved.push(path.to_string_lossy().into_owned());
+        }
+    }
+    system::verify_registration(&manifest.app_id, Some(&Registration::new(manifest, target)))?;
+    Ok(crate::RepairReport {
+        schema_version: 1,
+        task_id: receipt.task_id,
+        fully_repaired: preserved.is_empty(),
+        restored: vec![],
+        preserved,
+        backups: vec![],
+    })
+}
+
 pub(super) fn execute(
     request: EngineRequest<'_>,
     observer: &mut impl EngineObserver,
@@ -1020,10 +1208,14 @@ pub(super) fn execute(
     };
     journal.record("begin", &request.plan.install_dir, "", "prepared")?;
     // Persist the full compensation map before the first installation mutation.
-    let recovery = serde_json::json!({"schema_version":1,"task_id":request.plan.task_id,"install_dir":request.plan.install_dir,
-        "created":prepared.stage.iter().map(|v|&v.resource).collect::<Vec<_>>(),
-        "backup":prepared.backup.iter().map(|v|serde_json::json!({"source":v.source,"resource":v.resource})).collect::<Vec<_>>(),
-        "registration":prepared.registration,"next_registration":prepared.next_registration});
+    let recovery = crate::recovery::make_record(
+        &request,
+        &prepared.stage,
+        &prepared.backup,
+        &prepared.preserved,
+        prepared.registration.as_ref(),
+        prepared.next_registration.as_ref(),
+    )?;
     owned::write_new_bytes(
         text(&request.session_dir.join("engine-recovery.json"))?,
         &serde_json::to_vec_pretty(&recovery)?,
@@ -1042,6 +1234,48 @@ pub(super) fn execute(
     };
     match transaction.run(observer) {
         Ok(()) => {
+            if request.plan.operation == Operation::Repair {
+                let report = crate::RepairReport {
+                    schema_version: 1,
+                    task_id: request.plan.task_id.clone(),
+                    fully_repaired: transaction.prepared.repair_preserved.is_empty(),
+                    restored: transaction
+                        .prepared
+                        .stage
+                        .iter()
+                        .map(|v| v.resource.path.to_string_lossy().into_owned())
+                        .collect(),
+                    preserved: transaction.prepared.repair_preserved.clone(),
+                    backups: transaction
+                        .prepared
+                        .backup
+                        .iter()
+                        .map(|v| v.source.to_string_lossy().into_owned())
+                        .collect(),
+                };
+                if let Err(error) = owned::write_new_bytes(
+                    text(&request.session_dir.join("repair-report.json"))?,
+                    &serde_json::to_vec_pretty(&report)?,
+                ) {
+                    return Ok(EngineOutcome {
+                        exit_code: 4,
+                        detail: format!(
+                            "Repair committed, but its report could not be persisted: {error:#}"
+                        ),
+                    });
+                }
+                return Ok(EngineOutcome {
+                    exit_code: 0,
+                    detail: if report.fully_repaired {
+                        "Repair completed; installation resources verified.".into()
+                    } else {
+                        format!(
+                            "Missing resources repaired; {} modified resources were preserved.",
+                            report.preserved.len()
+                        )
+                    },
+                });
+            }
             if request.fault_point == Some("after-commit") {
                 return Ok(EngineOutcome{exit_code:4,detail:"Injected loss of terminal confirmation after a durable commit; inspect the committed journal.".into()});
             }
@@ -1153,7 +1387,7 @@ mod tests {
                 Operation::Install,
                 "task-install".into(),
                 root.clone(),
-                "S-1-5-21-100-100-100-1001".into(),
+                crate::recovery::current_user_sid().unwrap(),
             )
             .unwrap();
             let receipt = Receipt {
@@ -1185,6 +1419,50 @@ mod tests {
             fs::create_dir(&path).unwrap();
             path
         }
+        fn persistent_identity(&self, session: &Path, plan: &InstallPlan, alive: bool) {
+            let mut identity = avelin_core::session::running_process(std::process::id())
+                .unwrap()
+                .unwrap();
+            // Reused PID: the current test process is not the original task.
+            if !alive {
+                identity.creation_time_100ns -= 1;
+            }
+            let lock = self.product_lock();
+            avelin_core::reject_reparse(lock.parent().unwrap()).unwrap();
+            fs::create_dir_all(lock.parent().unwrap()).unwrap();
+            fs::write(&lock, format!("{}\n", identity.pid)).unwrap();
+            let record = avelin_core::session::SessionRecord {
+                schema_version: 1,
+                task_id: plan.task_id.clone(),
+                app_id: plan.app_id.clone(),
+                operation: plan.operation.as_str().into(),
+                install_dir: plan.install_dir.clone(),
+                manifest_sha256: plan.manifest_sha256.clone(),
+                coordinator: identity.clone(),
+                backend: identity,
+                product_lock: lock,
+                report_path: session.join("report.json"),
+            };
+            fs::write(
+                session.join("session.json"),
+                serde_json::to_vec_pretty(&record).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                session.join("install-plan.json"),
+                serde_json::to_vec_pretty(plan).unwrap(),
+            )
+            .unwrap();
+        }
+        fn product_lock(&self) -> PathBuf {
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+                .join("Avelin/M0/locks")
+                .join(format!(
+                    "{}-{}.lock",
+                    self.manifest.app_id,
+                    &hash_bytes(self.plan.user_sid.as_bytes())[..16]
+                ))
+        }
         fn request<'a>(
             &'a self,
             session: &'a Path,
@@ -1203,6 +1481,9 @@ mod tests {
                 step_delay_ms: 0,
                 fault_point: None,
                 pause_point: None,
+                recovery_session: None,
+                recovery_apply: false,
+                repair_overwrite: false,
             }
         }
         fn upgrade_inputs(&self, session: &Path, new: &Manifest) -> (InstallPlan, Receipt) {
@@ -1272,6 +1553,7 @@ mod tests {
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
+            let _ = fs::remove_file(self.product_lock());
             let _ = system::restore_registration(
                 &self.manifest.app_id,
                 None,
@@ -1318,6 +1600,478 @@ mod tests {
             runtime: b"runtime",
             files: vec![b"payload"],
         }
+    }
+    #[test]
+    fn repair_fills_missing_files_preserves_edits_and_explicitly_backs_up_replacements() {
+        let fixture = Fixture::new();
+        let payload = payload();
+        let install = fixture.session("install");
+        assert_eq!(
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default()
+            )
+            .unwrap()
+            .exit_code,
+            0
+        );
+        fs::write(fixture.root.join("entry.txt"), b"user change").unwrap();
+        fs::write(fixture.root.join("notes.txt"), b"private data").unwrap();
+        fs::remove_file(fixture.root.join(".avelin/avelin-app.exe")).unwrap();
+        system::replace_registration(
+            &fixture.manifest.app_id,
+            Some(&Registration::new(&fixture.manifest, &fixture.root)),
+            None,
+            &mut None,
+        )
+        .unwrap();
+        for (name, overwrite) in [
+            ("repair-preserve", false),
+            ("repair-replace", true),
+            ("repair-repeat", false),
+        ] {
+            let session = fixture.session(name);
+            let receipt_bytes = fs::read(fixture.root.join(RECEIPT_NAME)).unwrap();
+            let receipt: Receipt = serde_json::from_slice(&receipt_bytes).unwrap();
+            fs::write(session.join("prior-receipt.json"), &receipt_bytes).unwrap();
+            let plan = InstallPlan::new(
+                &fixture.manifest,
+                Operation::Repair,
+                name.into(),
+                fixture.root.clone(),
+                fixture.plan.user_sid.clone(),
+            )
+            .unwrap();
+            let mut candidate = receipt.clone();
+            candidate.task_id = plan.task_id.clone();
+            candidate.commit_id = format!("commit-{name}");
+            candidate.previous_commit_id = Some(receipt.commit_id.clone());
+            candidate.uninstaller_sha256 = None;
+            let mut request = fixture.request(&session, &payload);
+            request.plan = &plan;
+            request.receipt = &candidate;
+            request.repair_overwrite = overwrite;
+            let outcome = execute(request, &mut Observer::default()).unwrap();
+            assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
+            let report: crate::RepairReport =
+                serde_json::from_slice(&fs::read(session.join("repair-report.json")).unwrap())
+                    .unwrap();
+            assert_eq!(report.fully_repaired, name != "repair-preserve");
+            assert_eq!(
+                fs::read(fixture.root.join(".avelin/avelin-app.exe")).unwrap(),
+                b"runtime"
+            );
+            assert_eq!(
+                fs::read(fixture.root.join("notes.txt")).unwrap(),
+                b"private data"
+            );
+            if name == "repair-preserve" {
+                assert_eq!(
+                    fs::read(fixture.root.join("entry.txt")).unwrap(),
+                    b"user change"
+                );
+                assert_eq!(
+                    report.preserved,
+                    vec![
+                        fixture
+                            .root
+                            .join("entry.txt")
+                            .to_string_lossy()
+                            .into_owned()
+                    ]
+                );
+            } else {
+                assert_eq!(
+                    fs::read(fixture.root.join("entry.txt")).unwrap(),
+                    b"payload"
+                );
+            }
+            if overwrite {
+                assert!(
+                    report
+                        .backups
+                        .iter()
+                        .any(|v| fs::read(v).unwrap() == b"user change")
+                );
+            }
+            if name == "repair-repeat" {
+                assert_eq!(
+                    report.restored,
+                    vec![
+                        fixture
+                            .root
+                            .join(RECEIPT_NAME)
+                            .to_string_lossy()
+                            .into_owned()
+                    ]
+                );
+                assert_eq!(report.backups.len(), 1);
+            }
+            let committed: Receipt =
+                serde_json::from_slice(&fs::read(fixture.root.join(RECEIPT_NAME)).unwrap())
+                    .unwrap();
+            assert_eq!(committed.task_id, plan.task_id);
+            assert_eq!(committed.commit_id, candidate.commit_id);
+            assert_eq!(committed.previous_commit_id, Some(receipt.commit_id));
+            assert_eq!(committed.installation_id, receipt.installation_id);
+            let verified =
+                verify_repair(&fixture.manifest, &fixture.root, &fixture.plan.user_sid).unwrap();
+            assert_eq!(verified.fully_repaired, report.fully_repaired);
+        }
+    }
+
+    struct InterruptPublish;
+    impl EngineObserver for InterruptPublish {
+        fn progress(&mut self, phase: &str, current: u64, _: u64) -> Result<()> {
+            if phase == "extracting" && current == 1 {
+                panic!("simulated abrupt process termination");
+            }
+            Ok(())
+        }
+        fn checkpoint(&mut self) -> Result<bool> {
+            Ok(false)
+        }
+    }
+    fn interrupt_install(fixture: &Fixture, session: &Path, alive: bool) {
+        fixture.persistent_identity(session, &fixture.plan, alive);
+        let payload = payload();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute(fixture.request(session, &payload), &mut InterruptPublish)
+        }));
+        assert!(result.is_err());
+        assert!(fixture.root.join(MARKER).exists());
+    }
+    #[test]
+    fn cross_process_recovery_is_read_only_when_checked_and_reentrant_when_applied() {
+        let fixture = Fixture::new();
+        let session = fixture.session("interrupted");
+        interrupt_install(&fixture, &session, false);
+        let check = crate::inspect_recovery(
+            &fixture.manifest,
+            &fixture.root,
+            &session,
+            &fixture.plan.user_sid,
+        )
+        .unwrap();
+        assert_eq!(check.decision, "rollback");
+        assert!(!check.applied);
+        assert!(check.restored.is_empty());
+        assert!(fixture.root.join("entry.txt").exists());
+        let apply = || crate::RecoveryRequest {
+            manifest: &fixture.manifest,
+            target: &fixture.root,
+            session: &session,
+            user_sid: &fixture.plan.user_sid,
+            apply: true,
+        };
+        // Cancellation after the first compensation simulates losing the new
+        // controller. A second process must accept the already-removed file.
+        struct StopAfterFirst(usize);
+        impl EngineObserver for StopAfterFirst {
+            fn progress(&mut self, _: &str, _: u64, _: u64) -> Result<()> {
+                Ok(())
+            }
+            fn checkpoint(&mut self) -> Result<bool> {
+                self.0 += 1;
+                Ok(self.0 > 1)
+            }
+        }
+        assert!(crate::recover(apply(), &mut StopAfterFirst(0)).is_err());
+        assert!(!fixture.root.join("entry.txt").exists());
+        assert!(fixture.root.join(MARKER).exists());
+        let report = crate::recover(apply(), &mut Observer::default()).unwrap();
+        assert_eq!(report.decision, "rollback");
+        assert!(report.applied);
+        assert!(!fixture.root.exists());
+        assert!(!fixture.product_lock().exists());
+        assert_eq!(
+            crate::recover(apply(), &mut Observer::default())
+                .unwrap()
+                .decision,
+            "already_recovered"
+        );
+    }
+    #[test]
+    fn recovery_rejects_live_identity_changed_files_and_tampered_evidence() {
+        for kind in ["alive", "changed-file", "changed-map", "wrong-user"] {
+            let fixture = Fixture::new();
+            let session = fixture.session(kind);
+            interrupt_install(&fixture, &session, kind == "alive");
+            if kind == "changed-file" {
+                fs::write(fixture.root.join("entry.txt"), b"subsequent user edit").unwrap();
+            }
+            if kind == "changed-map" {
+                let path = session.join("engine-recovery.json");
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value["receipt"]["installation_id"] = "another-installation".into();
+                fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+            }
+            let sid = if kind == "wrong-user" {
+                "S-1-5-21-1-2-3-1001"
+            } else {
+                &fixture.plan.user_sid
+            };
+            assert!(
+                crate::inspect_recovery(&fixture.manifest, &fixture.root, &session, sid).is_err(),
+                "{kind}"
+            );
+            assert!(fixture.root.join(MARKER).exists());
+            assert!(fixture.root.join("entry.txt").exists());
+        }
+    }
+    #[test]
+    fn recovery_never_treats_consistently_rehashed_foreign_paths_as_instructions() {
+        let fixture = Fixture::new();
+        let session = fixture.session("redirected");
+        interrupt_install(&fixture, &session, false);
+        let user_data = fixture.root.join("private-notes.txt");
+        fs::write(&user_data, b"payload").unwrap();
+        let path = session.join("engine-recovery.json");
+        let mut map: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        map["stage"][0]["resource"]["path"] = serde_json::to_value(&user_data).unwrap();
+        let bytes = serde_json::to_vec_pretty(&map).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let payload = payload();
+        let marker = crate::recovery::marker_bytes(
+            &fixture.request(&session, &payload),
+            &hash_bytes(&bytes),
+        )
+        .unwrap();
+        fs::write(fixture.root.join(MARKER), &marker).unwrap();
+        let journal = session.join("engine-journal.jsonl");
+        let rows = fs::read_to_string(&journal).unwrap();
+        let mut changed = String::new();
+        for line in rows.lines() {
+            let mut row: serde_json::Value = serde_json::from_str(line).unwrap();
+            if row["event"] == "marker_intent" || row["event"] == "marker_created" {
+                row["sha256"] = hash_bytes(&marker).into();
+            }
+            changed.push_str(&serde_json::to_string(&row).unwrap());
+            changed.push('\n');
+        }
+        fs::write(journal, changed).unwrap();
+        assert!(
+            crate::inspect_recovery(
+                &fixture.manifest,
+                &fixture.root,
+                &session,
+                &fixture.plan.user_sid
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(user_data).unwrap(), b"payload");
+        assert!(fixture.root.join("entry.txt").exists());
+    }
+    #[test]
+    fn recovery_rejects_forged_registry_values_and_completion_without_intent() {
+        for complete in [false, true] {
+            let fixture = Fixture::new();
+            let session = fixture.session("forged-registry");
+            interrupt_install(&fixture, &session, false);
+            let after = if complete {
+                serde_json::json!({"values":{}})
+            } else {
+                serde_json::json!({"values":{"UninstallString":[1,[101,0,0,0]]}})
+            };
+            let step =
+                serde_json::json!({"before":{"values":null},"after":after,"complete":complete});
+            fs::write(
+                session.join("engine-registry.jsonl"),
+                format!("{}\n", serde_json::to_string(&step).unwrap()),
+            )
+            .unwrap();
+            assert!(
+                crate::inspect_recovery(
+                    &fixture.manifest,
+                    &fixture.root,
+                    &session,
+                    &fixture.plan.user_sid
+                )
+                .is_err()
+            );
+            system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+            assert!(fixture.root.join(MARKER).exists());
+        }
+    }
+    #[test]
+    fn recovery_confirms_durable_commit_even_when_no_terminal_confirmation_arrived() {
+        let fixture = Fixture::new();
+        let session = fixture.session("committed");
+        fixture.persistent_identity(&session, &fixture.plan, false);
+        let payload = payload();
+        let mut request = fixture.request(&session, &payload);
+        request.fault_point = Some("after-commit");
+        assert_eq!(
+            execute(request, &mut Observer::default())
+                .unwrap()
+                .exit_code,
+            4
+        );
+        let before = fs::read(fixture.root.join(RECEIPT_NAME)).unwrap();
+        let report = crate::recover(
+            crate::RecoveryRequest {
+                manifest: &fixture.manifest,
+                target: &fixture.root,
+                session: &session,
+                user_sid: &fixture.plan.user_sid,
+                apply: true,
+            },
+            &mut Observer::default(),
+        )
+        .unwrap();
+        assert_eq!(report.decision, "confirm_committed");
+        assert_eq!(fs::read(fixture.root.join(RECEIPT_NAME)).unwrap(), before);
+        assert_eq!(
+            fs::read(fixture.root.join("entry.txt")).unwrap(),
+            b"payload"
+        );
+    }
+    #[test]
+    fn recovery_restores_upgrade_and_uninstall_after_registry_mutation() {
+        struct InterruptFinalizing;
+        impl EngineObserver for InterruptFinalizing {
+            fn progress(&mut self, phase: &str, _: u64, _: u64) -> Result<()> {
+                if phase == "finalizing" {
+                    panic!("simulated abrupt termination before commit seal");
+                }
+                Ok(())
+            }
+            fn checkpoint(&mut self) -> Result<bool> {
+                Ok(false)
+            }
+        }
+        for operation in [Operation::Upgrade, Operation::Uninstall] {
+            let fixture = Fixture::new();
+            let install = fixture.session("install");
+            let payload = payload();
+            assert_eq!(
+                execute(
+                    fixture.request(&install, &payload),
+                    &mut Observer::default()
+                )
+                .unwrap()
+                .exit_code,
+                0
+            );
+            let original = fs::read(fixture.root.join(RECEIPT_NAME)).unwrap();
+            let session = fixture.session("interrupted-maintenance");
+            let mut manifest = fixture.manifest.clone();
+            let next_payload = NativePayload {
+                runtime: b"runtime",
+                files: vec![b"updated"],
+            };
+            let (plan, receipt) = if operation == Operation::Upgrade {
+                manifest.app_version = "2.0.0".into();
+                manifest.files[0].sha256 = hash_bytes(b"updated");
+                fixture.upgrade_inputs(&session, &manifest)
+            } else {
+                (
+                    InstallPlan::new(
+                        &manifest,
+                        operation,
+                        "task-uninstall".into(),
+                        fixture.root.clone(),
+                        fixture.plan.user_sid.clone(),
+                    )
+                    .unwrap(),
+                    serde_json::from_slice(&original).unwrap(),
+                )
+            };
+            fixture.persistent_identity(&session, &plan, false);
+            let mut request = fixture.request(
+                &session,
+                if operation == Operation::Upgrade {
+                    &next_payload
+                } else {
+                    &payload
+                },
+            );
+            request.manifest = &manifest;
+            request.plan = &plan;
+            request.receipt = &receipt;
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(
+                    request,
+                    &mut InterruptFinalizing
+                )))
+                .is_err()
+            );
+            assert!(!session.join("engine-commit.json").exists());
+            let report = crate::recover(
+                crate::RecoveryRequest {
+                    manifest: &manifest,
+                    target: &fixture.root,
+                    session: &session,
+                    user_sid: &fixture.plan.user_sid,
+                    apply: true,
+                },
+                &mut Observer::default(),
+            )
+            .unwrap();
+            assert_eq!(report.decision, "rollback");
+            assert_eq!(fs::read(fixture.root.join(RECEIPT_NAME)).unwrap(), original);
+            assert_eq!(
+                fs::read(fixture.root.join("entry.txt")).unwrap(),
+                b"payload"
+            );
+            system::verify_registration(
+                &manifest.app_id,
+                Some(&Registration::new(&fixture.manifest, &fixture.root)),
+            )
+            .unwrap();
+        }
+    }
+    #[test]
+    fn recovery_confirms_uninstall_from_its_seal_without_a_remaining_receipt() {
+        let fixture = Fixture::new();
+        let install = fixture.session("install");
+        let payload = payload();
+        assert_eq!(
+            execute(
+                fixture.request(&install, &payload),
+                &mut Observer::default()
+            )
+            .unwrap()
+            .exit_code,
+            0
+        );
+        let receipt: Receipt =
+            serde_json::from_slice(&fs::read(fixture.root.join(RECEIPT_NAME)).unwrap()).unwrap();
+        let session = fixture.session("uninstall");
+        let plan = InstallPlan::new(
+            &fixture.manifest,
+            Operation::Uninstall,
+            "task-uninstall".into(),
+            fixture.root.clone(),
+            fixture.plan.user_sid.clone(),
+        )
+        .unwrap();
+        fixture.persistent_identity(&session, &plan, false);
+        let mut request = fixture.request(&session, &payload);
+        request.plan = &plan;
+        request.receipt = &receipt;
+        request.fault_point = Some("after-commit");
+        assert_eq!(
+            execute(request, &mut Observer::default())
+                .unwrap()
+                .exit_code,
+            4
+        );
+        assert!(!fixture.root.exists());
+        let report = crate::recover(
+            crate::RecoveryRequest {
+                manifest: &fixture.manifest,
+                target: &fixture.root,
+                session: &session,
+                user_sid: &fixture.plan.user_sid,
+                apply: true,
+            },
+            &mut Observer::default(),
+        )
+        .unwrap();
+        assert_eq!(report.decision, "confirm_committed");
+        assert!(!fixture.root.exists());
     }
     fn terminal(session: &Path) -> String {
         let contents = fs::read_to_string(session.join("engine-journal.jsonl")).unwrap();

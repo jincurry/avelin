@@ -199,7 +199,7 @@ logo = "branding/nimbus.png"
 # Keep its immutable staging evidence outside the delivered folder; nothing is deleted.
 $buildRoot=Join-Path $output 'build'; $null=[IO.Directory]::CreateDirectory($buildRoot)
 $buildOutput=Join-Path $buildRoot 'sample/Nimbus-Rust-Setup.exe'
-$build=Run (Join-Path $kit 'bin/avelin-cli.exe') @('build','--engine','rust','--config',(Join-Path $kit 'sample/avelin.toml'),'--output',$buildOutput) $kit
+$build=Run (Join-Path $kit 'bin/avelin-cli.exe') @('build','--config',(Join-Path $kit 'sample/avelin.toml'),'--output',$buildOutput) $kit
 NewText (Join-Path $output 'build.stdout.json') $build.stdout
 NewText (Join-Path $output 'build.stderr.txt') $build.stderr
 $buildReport=$build.stdout | ConvertFrom-Json
@@ -249,30 +249,32 @@ NewText (Join-Path $kit 'README.md') @'
 
 ```powershell
 .\Verify-RustDevKit.ps1
-.\bin\avelin-cli.exe build --engine rust --config .\sample\avelin.toml --output ..\output\Nimbus-Rust-Setup.exe
+.\bin\avelin-cli.exe build --config .\sample\avelin.toml --output ..\output\Nimbus-Rust-Setup.exe
 ```
 
-输出位置必须是新的；成功后生成 Setup、backend 和 manifest。CLI 自动使用同目录的 `avelin-app.exe` 与 `avelin-engine.exe`，不需要 NSIS、bridge 或本机 Rust 工具链。最终 Setup 也不需要 PowerShell。接入自己的应用时修改示例产品 ID、名称、版本、入口与 payload 目录，不要沿用示例 ID。
+输出位置必须是新的；成功后生成 Setup、backend 和 manifest。CLI 自动使用同目录的 `avelin-app.exe` 与 `avelin-engine.exe`，不需要本机 Rust 工具链。最终 Setup 也不需要 PowerShell。接入自己的应用时修改示例产品 ID、名称、版本、入口与 payload 目录，不要沿用示例 ID。
 
 ## 演示程序
 
 双击 `sample/Nimbus-Rust-Setup.exe`，确认目录后开始安装。产品为「Nimbus 笔记 · Rust 预览」1.0.0，ID 为 `dev.avelin.native.sample`，默认不创建快捷方式。示例 `nimbus-demo.exe` 是输出文本后退出的控制台程序；安装完成后可以点击启动。卸载使用安装目录内的 `uninstall.exe` 或 Windows 已安装的应用入口。
 
-同版本重复安装会被拒绝；先正常卸载再重装，或使用同产品更高版本。卸载前关闭已启动的应用。
+同版本同构建的 Setup 会显示修复确认页；静默修复使用 `--silent --operation repair`。默认补齐缺失资源并保留修改内容；明确指定 `--repair-overwrite` 才在保留备份后恢复修改过的资源。卸载前关闭已启动的应用。
 
 ## 支持范围
 
-当前用户离线完整安装、安装取消、同产品固定目录的更高版本升级，以及按资源归属卸载。未知文件和修改过的载荷按归属规则保留；新载荷路径冲突时拒绝覆盖。升级和卸载不提供活动取消。
+当前用户离线完整安装、安装取消、同产品固定目录的更高版本升级、同构建修复，以及按资源归属卸载。未知文件和修改过的载荷按归属规则保留；新载荷路径冲突时拒绝覆盖。升级、卸载和维护操作不提供活动取消。
 
-不支持全用户安装、服务或驱动、在线下载、差分更新、自动恢复、任意脚本钩子或修复命令。Rust 载荷当前未压缩，每层嵌入区域上限 1 GiB，组件和元数据也占用空间。无法确认恢复结果时返回 Unknown 并保留事务证据；先诊断现场。详见 `docs/compatibility.md` 和 `docs/cli.md`。
+中断后保留原 Setup 和会话证据。`avelin-cli recover --session <原会话目录> --setup <原Setup>` 先只读检查，确认后添加 `--apply` 执行验证过的回滚或提交确认；也可在原 Setup 的恢复确认页操作。活动进程、身份不符、证据篡改和用户后改冲突均拒绝恢复。详见 `docs/maintenance.md`。
+
+不支持全用户安装、服务或驱动、在线下载、差分更新、无人确认的自动恢复或任意脚本钩子。Rust 载荷当前未压缩，每层嵌入区域上限 1 GiB，组件和元数据也占用空间。无法确认恢复结果时返回 Unknown 并保留事务证据；先诊断现场。详见 `docs/compatibility.md` 和 `docs/cli.md`。
 
 ## 完整性、来源与许可
 
 `Verify-RustDevKit.ps1` 只读校验全部文件及内部元数据，拒绝额外文件；可用 `-ZipPath <归档路径>` 同时校验 ZIP。`HASHES.json` 覆盖除自身外的全部文件，ZIP 外另附归档及清单摘要。摘要证明完整性，不等于可信发布者签名。`SOURCE-SNAPSHOT.json` 记录打包时的源码字节，不证明给定二进制来自该源码或构建可复现。`BUILD-INFO.json` 记录组件与本次构包检查。
 
-自有源码与示例资产采用 MIT，见 `LICENSE`、`NOTICE.md`。`third-party/` 保留许可采集材料与 `unknowns.json` 中声明的限制；原始元数据可能含本机构建路径，或包含未链接进本包的依赖与 NSIS 材料。公开发布附件前应单独审阅这些材料。
+自有源码与示例资产采用 MIT，见 `LICENSE`、`NOTICE.md`。`third-party/` 保留许可采集材料与 `unknowns.json` 中声明的限制；原始元数据可能含本机构建路径，或包含未链接进本包的依赖。公开发布附件前应单独审阅这些材料。
 
-`docs/` 来自仓库公开文档白名单，部分同时介绍默认 NSIS 后端；本工具包使用 `--engine rust`。文档中的源码、维护脚本和 examples 引用需在源码仓库中阅读；本包不包含完整仓库。构包日志和暂存证据留在 ZIP 外。
+`docs/` 来自仓库公开文档白名单，本工具包使用 Rust 引擎。文档中的源码、维护脚本和 examples 引用需在源码仓库中阅读；本包不包含完整仓库。构包日志和暂存证据留在 ZIP 外。
 '@
 $hashes=@(TreeFiles $kit | Sort-Object FullName | ForEach-Object { Record $kit $_.FullName })
 NewJson (Join-Path $kit 'HASHES.json') ([ordered]@{schema_version=1;algorithm='SHA256';scope='Every delivered regular file except HASHES.json itself';files=$hashes})

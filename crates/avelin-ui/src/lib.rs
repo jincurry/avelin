@@ -26,6 +26,11 @@ pub struct UiOptions {
     pub operation: avelin_core::Operation,
     /// Verified installed version for an in-place upgrade; supplied by the host.
     pub previous_version: Option<String>,
+    /// Read-only maintenance findings checked by the host before confirmation.
+    /// These describe missing/changed resources or the interrupted transaction.
+    pub maintenance_details: Vec<(String, String)>,
+    /// Explicit original-package restoration mode; changed resources are backed up first.
+    pub repair_overwrite: bool,
     pub desktop_shortcut: bool,
     pub start_menu_shortcut: bool,
     /// Validated, package-contained branding and text. The UI never reads config paths or URLs.
@@ -47,6 +52,8 @@ impl Default for UiOptions {
             install_dir: base.join("AvelinDemo").join("Nimbus"),
             operation: avelin_core::Operation::Install,
             previous_version: None,
+            maintenance_details: Vec::new(),
+            repair_overwrite: false,
             desktop_shortcut: true,
             start_menu_shortcut: true,
             presentation: Presentation::default(),

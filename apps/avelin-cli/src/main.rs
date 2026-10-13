@@ -1,11 +1,12 @@
-mod builder;
+mod build_output;
 mod components;
+mod config;
 mod diagnose;
 mod init;
 mod native_builder;
 mod presentation_config;
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use std::{io::Read, path::PathBuf};
 
 #[derive(Parser)]
@@ -13,12 +14,6 @@ use std::{io::Read, path::PathBuf};
 struct Args {
     #[command(subcommand)]
     command: Command,
-}
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-enum Engine {
-    #[default]
-    Nsis,
-    Rust,
 }
 #[derive(Subcommand)]
 enum Command {
@@ -57,6 +52,20 @@ enum Command {
         #[arg(long)]
         session: PathBuf,
     },
+    /// Inspect an interrupted Rust transaction with its original Setup; apply only when requested.
+    Recover {
+        #[arg(long)]
+        session: PathBuf,
+        /// Original Rust Setup containing the matching runtime and payload.
+        #[arg(long)]
+        setup: PathBuf,
+        /// Explicitly request the default read-only check.
+        #[arg(long, conflicts_with = "apply")]
+        check: bool,
+        /// Apply the recovery decision after validating the retained session.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Validate configuration and existing payload; no compiler/runtime dependency is needed.
     Check {
         #[arg(long)]
@@ -64,9 +73,6 @@ enum Command {
     },
     /// Build a new unsigned Setup using colocated or explicitly supplied components.
     Build {
-        /// Installation backend; the runtime and package configuration are shared.
-        #[arg(long, value_enum, default_value_t = Engine::Nsis)]
-        engine: Engine,
         #[arg(long)]
         config: PathBuf,
         #[arg(long)]
@@ -76,10 +82,6 @@ enum Command {
         /// Rust worker executable; otherwise resolved beside avelin-cli.exe.
         #[arg(long)]
         rust_worker: Option<PathBuf>,
-        #[arg(long)]
-        bridge: Option<PathBuf>,
-        #[arg(long)]
-        nsis: Option<PathBuf>,
     },
 }
 fn main() -> Result<()> {
@@ -134,44 +136,53 @@ fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&diagnose::inspect(&session)?)?
         ),
+        Command::Recover {
+            session,
+            setup,
+            check: _,
+            apply,
+        } => {
+            avelin_core::reject_reparse(&setup)?;
+            avelin_core::reject_reparse(&session)?;
+            // Keep ordinary absolute Windows paths: canonicalize adds a verbatim
+            // prefix that the Setup path contract deliberately does not accept.
+            let setup = std::path::absolute(setup).context("locate original Rust Setup")?;
+            let session =
+                std::path::absolute(session).context("locate retained recovery session")?;
+            ensure!(
+                setup.is_file(),
+                "--setup must name an existing Setup executable"
+            );
+            ensure!(
+                session.is_dir(),
+                "--session must name an existing session directory"
+            );
+            let mut command = std::process::Command::new(&setup);
+            command.args(["--silent", "--operation", "recover", "--recovery-session"]);
+            command.arg(&session);
+            if apply {
+                command.arg("--recovery-apply");
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW; all stdio remains inherited.
+            }
+            let status = command
+                .status()
+                .context("run recovery through original Setup")?;
+            std::process::exit(status.code().unwrap_or(1));
+        }
         Command::Check { config } => {
-            let (_, manifest) = builder::load(&config)?;
+            let (_, manifest) = config::load(&config)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::Build {
-            engine,
             config,
             output,
             runtime,
             rust_worker,
-            bridge,
-            nsis,
-        } => {
-            validate_engine_components(engine, &rust_worker, &bridge, &nsis)?;
-            match engine {
-                Engine::Nsis => builder::build(&config, &output, runtime, bridge, nsis)?,
-                Engine::Rust => native_builder::build(&config, &output, runtime, rust_worker)?,
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_engine_components(
-    engine: Engine,
-    rust_worker: &Option<PathBuf>,
-    bridge: &Option<PathBuf>,
-    nsis: &Option<PathBuf>,
-) -> Result<()> {
-    match engine {
-        Engine::Nsis => ensure!(
-            rust_worker.is_none(),
-            "--rust-worker requires --engine rust"
-        ),
-        Engine::Rust => ensure!(
-            bridge.is_none() && nsis.is_none(),
-            "--engine rust does not accept --bridge or --nsis"
-        ),
+        } => native_builder::build(&config, &output, runtime, rust_worker)?,
     }
     Ok(())
 }
@@ -181,7 +192,7 @@ mod argument_tests {
     use super::*;
 
     #[test]
-    fn existing_build_defaults_to_nsis_and_rust_is_explicit() {
+    fn build_accepts_only_current_component_options() {
         let parse = |extra: &[&str]| {
             Args::try_parse_from(
                 [
@@ -199,27 +210,53 @@ mod argument_tests {
         assert!(matches!(
             parse(&[]).unwrap().command,
             Command::Build {
-                engine: Engine::Nsis,
+                runtime: None,
+                rust_worker: None,
                 ..
             }
         ));
-        assert!(matches!(
-            parse(&["--engine", "rust"]).unwrap().command,
-            Command::Build {
-                engine: Engine::Rust,
-                ..
-            }
-        ));
-        assert!(parse(&["--engine", "unknown"]).is_err());
+        let Command::Build {
+            runtime,
+            rust_worker,
+            ..
+        } = parse(&["--runtime", "runtime.exe", "--rust-worker", "worker.exe"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected build");
+        };
+        assert_eq!(runtime, Some(PathBuf::from("runtime.exe")));
+        assert_eq!(rust_worker, Some(PathBuf::from("worker.exe")));
+        // Removed command-line options must fail instead of silently changing behavior.
+        for option in ["--engine", "--bridge", "--nsis"] {
+            assert!(parse(&[option, "unused"]).is_err(), "accepted {option}");
+        }
     }
 
     #[test]
-    fn engine_specific_arguments_cannot_be_silently_ignored() {
-        let some = Some(PathBuf::from("component.exe"));
-        assert!(validate_engine_components(Engine::Nsis, &some, &None, &None).is_err());
-        assert!(validate_engine_components(Engine::Rust, &None, &some, &None).is_err());
-        assert!(validate_engine_components(Engine::Rust, &some, &None, &some).is_err());
-        assert!(validate_engine_components(Engine::Rust, &some, &None, &None).is_ok());
-        assert!(validate_engine_components(Engine::Nsis, &None, &some, &some).is_ok());
+    fn recovery_is_read_only_unless_apply_is_explicit() {
+        let parse = |extra: &[&str]| {
+            Args::try_parse_from(
+                [
+                    "avelin-cli",
+                    "recover",
+                    "--session",
+                    "session",
+                    "--setup",
+                    "Setup.exe",
+                ]
+                .into_iter()
+                .chain(extra.iter().copied()),
+            )
+        };
+        assert!(matches!(
+            parse(&[]).unwrap().command,
+            Command::Recover { apply: false, .. }
+        ));
+        assert!(matches!(
+            parse(&["--apply"]).unwrap().command,
+            Command::Recover { apply: true, .. }
+        ));
+        assert!(parse(&["--check", "--apply"]).is_err());
     }
 }

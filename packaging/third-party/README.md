@@ -5,8 +5,7 @@
 - `inputs/upstream/` 保存 Cargo 发布包遗漏、但可在同一源码提交或其父仓库找到的原始 LICENSE/NOTICE。
 - `simd_helpers`、`seahash` 的发布提交没有 LICENSE；保存后续仅新增 LICENSE 的完整上游比较结果，并验证除此之外没有源码差异。生成器保留原始比较记录。
 - `mac 0.1.1` 的发布包及已查阅上游均没有独立许可全文。生成器保存发布包 README/Cargo 中实际的 MIT/Apache-2.0 声明与完整未改源码，并在 `unknowns.json` 明示这个事实，不编造作者或许可文本。
-- `inputs/nsis-3.12-src.tar.bz2` 是官方 NSIS 3.12 原始源代码包。SHA256：`f3ed7a8e4aa2cf4e8cf47d3b563a02559e0cb4934db2662b2f9661b824e2b186`。生成器核对源包 COPYING 与本机 NSIS COPYING 相符，并随许可材料带上该归档。
 
-修改依赖、NSIS 版本或这些输入时，重新核对上游版本关系、许可原文及摘要，再运行 [采集器](../../scripts/collect-third-party.py)。不能把新的许可证文本直接绑定到没有证据的旧版本。输入中的链接是来源记录，生成器不联网。
+修改依赖或这些输入时，重新核对上游版本关系、许可原文及摘要，再运行 [采集器](../../scripts/collect-third-party.py)。不能把新的许可证文本直接绑定到没有证据的旧版本。输入中的链接是来源记录，生成器不联网。
 
 执行、输出范围和现有限制见[第三方材料](../../docs/third-party.md)。Avelin 自有内容采用根目录 MIT；这里的上游文件保留各自版权和许可，不能统一替换为 MIT。

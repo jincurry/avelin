@@ -89,7 +89,7 @@ function Read-RegisteredProducts([string]$Hive, [string]$View) {
                 $product = $key.OpenSubKey($name, $false)
                 if ($null -eq $product) { throw 'Registered product disappeared during collection.' }
                 $displayName = [string]$product.GetValue('DisplayName', '')
-                if ($displayName -match '(?i)Visual Studio|Build Tools|Windows.*(SDK|Software Development Kit)|NSIS|Nullsoft.*Install|Rust(up)?|Visual C\+\+.*(Redistributable|Runtime)|VC\+\+.*Runtime') {
+                if ($displayName -match '(?i)Visual Studio|Build Tools|Windows.*(SDK|Software Development Kit)|Rust(up)?|Visual C\+\+.*(Redistributable|Runtime)|VC\+\+.*Runtime') {
                     $products += [ordered]@{ name = $displayName; version = $product.GetValue('DisplayVersion', $null); publisher = $product.GetValue('Publisher', $null) }
                 }
             }
@@ -316,10 +316,6 @@ foreach ($tool in @('rustup', 'rustc', 'cargo')) {
     if ($cargoRoot) { $knownPath = Join-Path $cargoRoot "bin\$tool.exe" }
     $knownTools += Read-KnownExecutable $tool $knownPath 'Explicit CARGO_HOME/bin or conventional current-user .cargo/bin; no recursive search'
 }
-foreach ($programRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
-    if ($programRoot) { $knownTools += Read-KnownExecutable 'makensis' (Join-Path $programRoot 'NSIS\makensis.exe') 'Conventional Program Files/NSIS directory; no recursive search' }
-}
-
 $report = [ordered]@{
     schema_version = 1
     collected_at_utc = [DateTime]::UtcNow.ToString('o')

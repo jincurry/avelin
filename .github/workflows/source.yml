@@ -31,7 +31,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup target add --toolchain stable x86_64-pc-windows-msvc i686-pc-windows-msvc
+          rustup target add --toolchain stable x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Formatting and source tests
         run: ./scripts/check-source.ps1 -OutputDirectory target/source-ci

@@ -486,16 +486,5 @@
         }
       ]
     }
-  ],
-  "archives": [
-    {
-      "component": "NSIS 3.12",
-      "path": "nsis-3.12-src.tar.bz2",
-      "url": "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12-src.tar.bz2",
-      "sha256": "f3ed7a8e4aa2cf4e8cf47d3b563a02559e0cb4934db2662b2f9661b824e2b186",
-      "size": 1818389,
-      "retrieved_at_utc": "2026-10-12",
-      "verification": "Official project release source; local COPYING comparison performed by collector; no claim of reproducible NSIS executable build"
-    }
   ]
 }

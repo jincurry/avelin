@@ -17,19 +17,15 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shutil
 import stat
 import subprocess
-import sys
-import tarfile
 import tomllib
 
 LICENSE_NAME = re.compile(r"^(?:licen[cs]e|copying|copyright|notice|unlicense|ofl)(?:[._-].*)?$", re.I)
-CODE_EXTENSIONS = {".rs", ".c", ".cpp", ".h", ".nsh", ".nsi", ".py", ".js"}
+CODE_EXTENSIONS = {".rs", ".c", ".cpp", ".h", ".py", ".js"}
 NATIVE_EXTENSIONS = {".dll", ".lib", ".a", ".so", ".dylib", ".exe"}
 FONT_EXTENSIONS = {".ttf", ".otf", ".woff", ".woff2"}
-ROOTS = {"x86_64-pc-windows-msvc": ["avelin-app", "avelin-cli", "avelin-engine"],
-         "i686-pc-windows-msvc": ["avelin-nsis-bridge"]}
+ROOTS = {"x86_64-pc-windows-msvc": ["avelin-app", "avelin-cli", "avelin-engine"]}
 
 
 def digest(data: bytes) -> str:
@@ -151,7 +147,6 @@ def dependency_roles(metadata, root_names):
 def collect(args):
     project = no_reparse(args.project_root)
     output = no_reparse(args.output)
-    nsis = no_reparse(args.nsis_root)
     if output.exists() and any(output.iterdir()):
         raise RuntimeError("Output must be new or empty; preserve the previous evidence and choose a new directory")
     output.mkdir(parents=True, exist_ok=True)
@@ -161,34 +156,6 @@ def collect(args):
     lock_map = {(p["name"], p["version"], p.get("source")): p for p in lock["package"]}
     package_map, roles_by_target, metadata_records = {}, {}, []
     for target, roots in ROOTS.items():
-        if target == "i686-pc-windows-msvc":
-            # Full-workspace i686 metadata pulls in an unshipped 32-bit GUI.
-            # Bind the real bridge-only target with Cargo's filtered tree and
-            # require exact agreement with its metadata dependency subgraph.
-            invocation = ["cargo", "tree", "--locked", "--offline", "-p", "avelin-nsis-bridge",
-                          "--target", target, "--edges", "normal,build", "--prefix", "none", "--format", "{p}"]
-            raw = command(invocation, project)
-            actual = {tuple(match.groups()) for line in raw.decode().splitlines()
-                      if (match := re.match(r"^([\w-]+) v([^\s]+)", line))}
-            roles = dependency_roles(metadata, roots)
-            by_id = {p["id"]: p for p in metadata["packages"]}
-            expected = {(by_id[p]["name"], by_id[p]["version"]) for p, kinds in roles.items()
-                        if kinds & {"runtime", "build"}}
-            if actual - expected:
-                raise RuntimeError(f"i686 bridge has inputs absent from collected metadata: {actual - expected}")
-            # Workspace feature unification can add serde_json/indexmap or
-            # digest features to the GUI graph; Cargo tree is authoritative
-            # for the delivered bridge. Record those over-included nodes.
-            roles_by_target[target] = {p: kinds for p, kinds in roles.items()
-                                       if (by_id[p]["name"], by_id[p]["version"]) in actual
-                                       and kinds & {"runtime", "build"}}
-            evidence_path = output / "metadata" / (target + "-bridge-tree.txt.gz")
-            evidence_path.write_bytes(gzip.compress(raw, mtime=0))
-            metadata_records.append({"target": target, "roots": roots, "arguments": invocation,
-                                     "raw_sha256": digest(raw), "path": evidence_path.relative_to(output).as_posix(),
-                                     "excluded_workspace_feature_unification": sorted(expected - actual),
-                                     "method": "Every actual normal/build bridge Cargo tree package bound to metadata; workspace-feature-only nodes excluded; no unshipped 32-bit GUI resolution"})
-            continue
         invocation = ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
                       "--filter-platform", target, "--features", "avelin-app/gui"]
         raw = command(invocation, project)
@@ -205,7 +172,7 @@ def collect(args):
 
     inputs = project / "packaging" / "third-party" / "inputs"
     supplements_path = inputs / "supplements.json"
-    supplements = read_json(supplements_path) if supplements_path.exists() else {"crates": [], "archives": []}
+    supplements = read_json(supplements_path) if supplements_path.exists() else {"crates": []}
     supplement_input = (copy_evidence(supplements_path, output, "metadata/supplements.json",
                                       origin="Reviewed offline generator input; upstream URLs and pinned revisions retained")
                         if supplements_path.exists() else None)
@@ -312,42 +279,6 @@ def collect(args):
                            "license": [x for x in texts if "LUCIDE" in x["path"]],
                            "files": [{"path": p.relative_to(root).as_posix(), "size": p.stat().st_size, "sha256": file_hash(p)} for p in icons]})
 
-    nsis_version = command([nsis / "makensis.exe", "/VERSION"], project).decode().strip()
-    if nsis_version not in {"v3.12", "3.12"}:
-        raise RuntimeError(f"Expected reviewed NSIS 3.12, got {nsis_version}")
-    nsis_files = []
-    nsis_texts = []
-    for path in walk_files(nsis):
-        relative = path.relative_to(nsis).as_posix()
-        nsis_files.append({"path": relative, "size": path.stat().st_size, "sha256": file_hash(path)})
-        if license_candidate(path, nsis):
-            nsis_texts.append(copy_evidence(path, output, f"licenses/nsis/{relative}", origin="NSIS 3.12 local distribution"))
-    nsis_record = {"version": nsis_version, "declared_license_summary": "Zlib; bzip2; CPL-1.0 with NSIS LZMA linking exception; other notices where specified",
-                   "official_license": "https://nsis.sourceforge.io/Docs/AppendixI.html", "files": nsis_files,
-                   "license_texts": nsis_texts, "portable_policy": "Inventory the local NSIS tree; ship COPYING, Docs, Contrib, Examples, Include, Plugins, Stubs, Bin, makensis.exe and nsisconf.nsh. Exclude the root UI launchers, compiled help and machine-specific uninstaller listed below.",
-                   "required_by_builder": ["makensis.exe", "Bin/makensis.exe", "Bin/zlib1.dll", "Stubs", "Include", "Plugins", "Contrib", "nsisconf.nsh", "COPYING"],
-                   "optional_but_retained": ["Docs", "Examples", "Bin/zip2exe.exe", "Bin/MakeLangId.exe", "Bin/GenPat.exe"],
-                   "exclude_from_redistributed_toolkit": ["NSIS.exe", "makensisw.exe", "NSIS.chm", "uninst-nsis.exe"]}
-    save(output / "nsis-inventory.json", nsis_record)
-    for archive in supplements.get("archives", []):
-        path = inputs / checked_relative(archive["path"])
-        if file_hash(path) != archive["sha256"]:
-            raise RuntimeError(f"Source archive mismatch: {path}")
-        copied = copy_evidence(path, output, "sources/" + path.name, origin_url=archive["url"], component=archive["component"])
-        source_records.append(copied)
-        if archive["component"] == "NSIS 3.12":
-            with tarfile.open(path, "r:bz2") as tar:
-                members = tar.getmembers()
-                copying = next(m for m in members if m.name.endswith("/COPYING") and m.name.count("/") == 1)
-                content = tar.extractfile(copying).read()
-                if content.replace(b"\r\n", b"\n") != (nsis / "COPYING").read_bytes().replace(b"\r\n", b"\n"):
-                    raise RuntimeError("Official source COPYING differs from local NSIS license")
-                source_records.append({"component": "NSIS 3.12 source contents", "archive": copied["path"],
-                                       "copying_matches_local": True,
-                                       "members": [{"path": m.name, "size": m.size, "type": str(m.type)} for m in members]})
-    if not any(x.get("component") == "NSIS 3.12" for x in source_records):
-        unknowns.append({"component": "NSIS LZMA", "issue": "Matching NSIS 3.12 source archive not included; distribution source obligations remain unresolved"})
-
     rust_version = command(["rustc", "-Vv"], project).decode().strip()
     sysroot = Path(command(["rustc", "--print", "sysroot"], project).decode().strip())
     rust_texts = []
@@ -360,7 +291,7 @@ def collect(args):
             unknowns.append({"component": "Rust standard library", "issue": "Local COPYRIGHT-library.html missing"})
     rust_record = {"rustc": rust_version, "license_texts": rust_texts,
                    "scope": "Compiled Rust standard-library attribution; compiler executable itself is not shipped in the DevKit"}
-    native.append({"component": "MSVC static CRT / Windows SDK", "scope": ".cargo/config.toml enables +crt-static on both Windows targets; OS import libraries also appear in crate inventory",
+    native.append({"component": "MSVC static CRT / Windows SDK", "scope": ".cargo/config.toml enables +crt-static on the Windows x64 target; OS import libraries also appear in crate inventory",
                    "distribution": "No Visual Studio compiler/SDK/standalone system DLLs are copied by this collector",
                    "status": "Redistribution rights derive from the builder's applicable Microsoft terms, not Cargo SPDX declarations"})
     unknowns.append({"component": "Microsoft build/runtime inputs", "issue": "Applicable Visual Studio/SDK redistribution entitlement is not certified by this collector; verify publisher entitlement before public distribution"})
@@ -373,10 +304,10 @@ def collect(args):
     if local_vendor:
         unknowns.append({"component": "workspace vendor inputs", "issue": "Additional vendor tree found; records require explicit review", "files": local_vendor})
     else:
-        native.append({"component": "workspace vendor trees", "scope": "No vendor/ or packaging/vendor/ tree exists; registry native libraries and full NSIS directory inventoried separately"})
+        native.append({"component": "workspace vendor trees", "scope": "No vendor/ or packaging/vendor/ tree exists; registry native libraries inventoried separately"})
 
     excluded = [{"name": p["name"], "version": p["version"], "source": p.get("source"), "checksum": p.get("checksum"),
-                 "scope": "Locked but absent from both filtered Windows metadata graphs; not asserted to be delivered"}
+                 "scope": "Locked but absent from the filtered Windows x64 metadata graph; not asserted to be delivered"}
                 for p in lock["package"] if p.get("source") and (p["name"], p["version"], p.get("source")) not in resolved_keys]
     project_metadata = tomllib.loads((project / "Cargo.toml").read_text(encoding="utf-8-sig"))["workspace"]["package"]
     project_spdx = project_metadata.get("license")
@@ -390,7 +321,7 @@ def collect(args):
                  "cargo_lock_sha256": before_lock, "cargo_metadata": metadata_records, "supplement_input": supplement_input,
                  "project_license": project_license,
                  "crates": crates, "locked_not_in_windows_graphs": excluded, "assets": assets, "native_inputs": native,
-                 "rust_standard_library": rust_record, "nsis_inventory": "nsis-inventory.json", "sources": source_records,
+                 "rust_standard_library": rust_record, "sources": source_records,
                  "unknowns": unknowns, "limitations": ["No compatibility/legal certification", "Cargo metadata over-includes build/dev/feature-unified dependencies", "Source/header-only copyright notices are retained only for the components whose complete sources are supplied and recorded in sources; other crate headers are not exhaustively collected or classified by filename scanning", "No build, installation or network access performed by this generator"]}
     save(output / "inventory.json", inventory)
     save(output / "unknowns.json", unknowns)
@@ -400,7 +331,7 @@ def collect(args):
               "Actual license/NOTICE files are copied unchanged into `licenses/`; source locations, versions, declared SPDX expressions and hashes appear in `inventory.json`.",
               "The declared SPDX expression is reported verbatim; an OR expression is not silently replaced by a license selected by this collector.",
               "", "## Embedded icons and fonts", "", "GPUI Kit Assets bundles Lucide (ISC) and Feather-derived (MIT) SVG icons; preserve LICENSE-LUCIDE. Windows fonts are referenced by name, not redistributed.",
-              "", "## NSIS and native inputs", "", "NSIS 3.12 COPYING includes zlib/libpng, bzip2, CPL-1.0 and the LZMA linking exception. The unchanged official source archive is included when recorded in inventory.json. Other component notices remain in the portable compiler tree.",
+              "", "## Native inputs", "",
               "Rust standard-library attribution is in licenses/rust-standard-library. Microsoft compiler/SDK/runtime rights remain governed by the publisher's applicable Microsoft terms.",
               "", "## Declared limitations", ""]
     notice += [f"- **{item['component']}**: {item['issue']}" for item in unknowns]
@@ -413,7 +344,7 @@ def collect(args):
              for p in sorted(walk_files(output)) if p.name != "FILES.json"]
     save(output / "FILES.json", {"schema_version": 1, "algorithm": "SHA256", "files": files})
     verified = verify(output)
-    return {**verified, "crates": len(crates), "locked_not_in_windows_graphs": len(excluded), "unknowns": len(unknowns), "nsis_files": len(nsis_files), "output": str(output)}
+    return {**verified, "crates": len(crates), "locked_not_in_windows_graphs": len(excluded), "unknowns": len(unknowns), "output": str(output)}
 
 
 def verify(output: Path):
@@ -437,7 +368,6 @@ def verify(output: Path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, default=Path(__file__).absolute().parents[1])
-    parser.add_argument("--nsis-root", type=Path, default=Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "NSIS")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--verify", type=Path, help="Only verify the listed bytes of an existing bundle")
     args = parser.parse_args()

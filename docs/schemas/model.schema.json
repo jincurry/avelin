@@ -217,7 +217,9 @@
           "enum": [
             "install",
             "uninstall",
-            "upgrade"
+            "upgrade",
+            "repair",
+            "recover"
           ]
         },
         "app_id": {

@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
+    os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -29,6 +30,8 @@ pub enum Operation {
     Install,
     Upgrade,
     Uninstall,
+    Repair,
+    Recover,
 }
 impl From<Operation> for avelin_core::Operation {
     fn from(operation: Operation) -> Self {
@@ -36,13 +39,15 @@ impl From<Operation> for avelin_core::Operation {
             Operation::Install => Self::Install,
             Operation::Upgrade => Self::Upgrade,
             Operation::Uninstall => Self::Uninstall,
+            Operation::Repair => Self::Repair,
+            Operation::Recover => Self::Recover,
         }
     }
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
     version,
-    about = "Avelin runtime: current-user installation, full-package upgrade and uninstall"
+    about = "Avelin runtime: current-user installation, upgrade, repair, recovery and uninstall"
 )]
 pub struct Args {
     #[arg(long)]
@@ -55,6 +60,17 @@ pub struct Args {
     pub report: Option<PathBuf>,
     #[arg(long, value_enum, default_value = "install")]
     pub operation: Operation,
+    /// Original interrupted task session; checked against this package and current user.
+    #[arg(long)]
+    pub recovery_session: Option<PathBuf>,
+    /// Execute the checked recovery. Silent recovery otherwise performs a read-only check.
+    #[arg(long)]
+    pub recovery_apply: bool,
+    /// Explicitly restore changed managed files from this package after backing them up.
+    #[arg(long)]
+    pub repair_overwrite: bool,
+    #[arg(skip)]
+    maintenance_details: Vec<crate::maintenance::Finding>,
     #[arg(long)]
     pub cancel_after_files: Option<u64>,
     /// Experiment timer measured from backend launch, with no artificial file barrier.
@@ -66,7 +82,7 @@ pub struct Args {
     #[arg(long, hide = true, value_parser = ["after-staging", "before-registration", "after-registration", "before-commit", "after-commit", "rollback"])]
     pub engine_fault: Option<String>,
     /// Bounded pause for real-process interruption acceptance only.
-    #[arg(long, hide = true, value_parser = ["prepared", "after-first-publish", "after-commit"])]
+    #[arg(long, hide = true, value_parser = ["prepared", "after-first-publish", "after-first-remove", "after-commit", "recovery-after-first-mutation"])]
     pub engine_pause: Option<String>,
     #[arg(long, default_value = "0")]
     pub step_delay_ms: u32,
@@ -92,7 +108,7 @@ pub struct Args {
 }
 
 struct AppLock {
-    _file: File,
+    _file: Option<File>,
     path: PathBuf,
     retain: bool,
 }
@@ -108,21 +124,60 @@ impl AppLock {
             .context("another task or an unresolved interrupted task holds the product lock; inspect logs before recovery")?;
         writeln!(file, "{}", std::process::id())?;
         Ok(Self {
-            _file: file,
+            _file: Some(file),
             path,
             retain: false,
         })
     }
+
+    fn seal(&mut self, session: &Path, target: &Path) -> Result<()> {
+        let mut writer = self
+            ._file
+            .take()
+            .context("product lock is already sealed")?;
+        writeln!(
+            writer,
+            "session={}\ninstall_dir={}",
+            session.display(),
+            target.display()
+        )?;
+        writer.flush()?;
+        writer.sync_all()?;
+        // A write-capable handle conflicts with the worker's read-only hash
+        // pin under Windows' symmetric sharing rules. Keep only a read handle
+        // after recording the immutable discovery hints.
+        drop(writer);
+        reject_reparse(&self.path)?;
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ: deny writes and deletion.
+            .open(&self.path)?;
+        self._file = Some(reader);
+        ensure!(
+            fs::read(&self.path)?
+                == format!(
+                    "{}\nsession={}\ninstall_dir={}\n",
+                    std::process::id(),
+                    session.display(),
+                    target.display()
+                )
+                .as_bytes(),
+            "product lock changed while sealing its discovery hints"
+        );
+        Ok(())
+    }
 }
 impl Drop for AppLock {
     fn drop(&mut self) {
+        // The read pin denies deletion, including our own cleanup.
+        drop(self._file.take());
         if !self.retain {
             let _ = fs::remove_file(&self.path);
         }
     }
 }
 
-/// Once NSIS starts, errors cannot imply that no filesystem changes occurred.
+/// Once the Rust worker starts, errors cannot imply that no filesystem changes occurred.
 #[derive(Debug)]
 struct UnconfirmedExecution;
 impl std::fmt::Display for UnconfirmedExecution {
@@ -213,15 +268,8 @@ impl Drop for BackendGuard {
         let still_running = observed_exit.is_none();
         let exit_code = observed_exit.map(|status| status.code().unwrap_or(-1));
         self.lock.retain = still_running;
-        if still_running {
-            let _ = writeln!(
-                self.lock._file,
-                "backend_pid={}\nstate=Unknown\nsession={}",
-                self.child.id(),
-                self.session.display()
-            );
-            let _ = self.lock._file.flush();
-        }
+        // The retained lock is immutable evidence bound by the native recovery
+        // record. Process/outcome updates belong in the task report, not here.
         if !self.completed {
             let message = if still_running {
                 "coordinator ended before a verified outcome; backend may still be running; product lock retained; inspect the session before retrying"
@@ -296,14 +344,46 @@ pub fn requests_gui(args: &Args) -> bool {
         && (args.gui
             || args.ui_demo
             || (cfg!(feature = "gui")
-                && (args.operation == Operation::Uninstall || args.install_dir.is_none())))
+                && (matches!(
+                    args.operation,
+                    Operation::Uninstall | Operation::Repair | Operation::Recover
+                ) || args.install_dir.is_none())))
 }
 
 fn validate_launch(args: &Args) -> Result<()> {
     ensure!(
-        (args.engine_fault.is_none() && args.engine_pause.is_none())
-            || (!args.ui_demo && args.operation != Operation::Uninstall),
-        "native fault checkpoints require an actual install or upgrade task"
+        args.operation == Operation::Recover
+            || (args.recovery_session.is_none() && !args.recovery_apply),
+        "recovery options require --operation recover"
+    );
+    ensure!(
+        args.operation == Operation::Repair || !args.repair_overwrite,
+        "--repair-overwrite requires --operation repair"
+    );
+    if matches!(args.operation, Operation::Repair | Operation::Recover) {
+        ensure!(
+            !args.ui_demo
+                && args.cancel_after_files.is_none()
+                && args.cancel_after_ms.is_none()
+                && args.fault_after_files.is_none()
+                && args.desktop_shortcut.is_none()
+                && args.start_menu_shortcut.is_none(),
+            "maintenance uses fixed installed resources and does not accept demo, cancel or shortcut overrides"
+        );
+    }
+    ensure!(
+        args.engine_fault.is_none() || (!args.ui_demo && args.operation != Operation::Uninstall),
+        "native fault injection is unavailable for demo or uninstall tasks"
+    );
+    ensure!(
+        args.engine_pause.is_none()
+            || (!args.ui_demo
+                && (args.operation != Operation::Uninstall
+                    || matches!(
+                        args.engine_pause.as_deref(),
+                        Some("after-first-remove" | "after-commit")
+                    ))),
+        "uninstall acceptance supports only after-first-remove and after-commit pauses; demo pauses are unavailable"
     );
     ensure!(
         !args.ui_demo || args.backend.is_none(),
@@ -362,10 +442,9 @@ fn environment(args: &Args) -> Result<(Arc<PinnedFile>, Manifest)> {
         let input = PinnedFile::open(&std::path::absolute(manifest)?)?;
         let manifest: Manifest = serde_json::from_slice(&input.read_bytes()?)?;
         manifest.validate()?;
-        return Ok((
-            Arc::new(PinnedFile::open(&std::path::absolute(backend)?)?),
-            manifest,
-        ));
+        let backend = Arc::new(PinnedFile::open(&std::path::absolute(backend)?)?);
+        resources::validate_backend(&backend, &manifest)?;
+        return Ok((backend, manifest));
     }
     ensure!(
         args.backend.is_none() && args.manifest.is_none(),
@@ -377,6 +456,7 @@ fn environment(args: &Args) -> Result<(Arc<PinnedFile>, Manifest)> {
         .context("no embedded payload; pass --backend and --manifest or --ui-demo")?;
     let folder = session_root(args)?;
     let backend = execution_files::create_file(&folder, "backend.exe", &backend)?;
+    resources::validate_backend(&backend, &manifest)?;
     Ok((Arc::new(backend), manifest))
 }
 
@@ -487,22 +567,146 @@ pub fn entry(mut args: Args) -> Result<i32> {
         anyhow::bail!("rebuild with --features gui to run the GPUI experiment");
     }
     let (backend, manifest) = environment(&args)?;
-    if args.engine_fault.is_some() || args.engine_pause.is_some() {
-        let (payload, embedded_manifest) = avelin_core::embedded(backend.path())?
-            .context("--engine-fault requires a native Rust backend package")?;
-        avelin_core::native_payload::NativePayload::parse(&payload, &embedded_manifest)?;
-        ensure!(
-            hash_bytes(&serde_json::to_vec(&embedded_manifest)?)
-                == hash_bytes(&serde_json::to_vec(&manifest)?),
-            "native backend manifest differs from the requested task"
-        );
-    }
-    // A visible package may discover an existing installation, but the user
-    // still confirms the Upgrade page. Headless install never silently upgrades.
+    // Discovery selects a confirmation page; it never applies recovery or repair.
     if args.operation != Operation::Uninstall {
-        let registered = crate::upgrade::registration(&manifest.app_id)?;
-        if args.operation == Operation::Install && requests_gui(&args) && registered.is_some() {
-            args.operation = Operation::Upgrade;
+        // An interrupted registration write can leave incomplete values. Find
+        // retained task evidence before attempting ordinary registration parsing.
+        if args.operation == Operation::Install && requests_gui(&args) {
+            let probe_target = args.install_dir.clone().unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+                    .join(&manifest.directory_name)
+            });
+            let pending = match crate::maintenance::pending_session_from_lock(
+                &manifest,
+                &transport::current_user_sid()?,
+            )? {
+                Some(session) => Some(session),
+                None => crate::maintenance::pending_session(&manifest, &probe_target)?,
+            };
+            if let Some(session) = pending {
+                let original_target = crate::maintenance::recovery_target(&manifest, &session)?;
+                if let Some(requested) = &args.install_dir {
+                    ensure!(
+                        resources::same_path(requested, &original_target),
+                        "recovery cannot change the interrupted task directory"
+                    );
+                }
+                args.operation = Operation::Recover;
+                args.recovery_session = Some(session);
+                args.install_dir = Some(original_target);
+            }
+        }
+        if args.operation == Operation::Recover
+            && args.recovery_session.is_none()
+            && args.install_dir.is_none()
+        {
+            args.recovery_session = crate::maintenance::pending_session_from_lock(
+                &manifest,
+                &transport::current_user_sid()?,
+            )?;
+        }
+        if args.operation == Operation::Recover && args.install_dir.is_none() {
+            if let Some(session) = &args.recovery_session {
+                args.install_dir = Some(crate::maintenance::recovery_target(&manifest, session)?);
+            }
+        }
+        let registered = if args.operation == Operation::Recover {
+            // Recovery verifies the original session and raw registry snapshots
+            // inside the engine, including legitimately partial writes.
+            None
+        } else {
+            crate::upgrade::registration(&manifest.app_id)?
+        };
+        let mut discovered_target = args
+            .install_dir
+            .clone()
+            .or_else(|| {
+                registered
+                    .as_ref()
+                    .map(|r| PathBuf::from(&r.install_location))
+            })
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
+                    .join(&manifest.directory_name)
+            });
+        if args.operation == Operation::Install && requests_gui(&args) {
+            let pending = match crate::maintenance::pending_session(&manifest, &discovered_target)?
+            {
+                Some(session) => Some(session),
+                None => crate::maintenance::pending_session_from_lock(
+                    &manifest,
+                    &transport::current_user_sid()?,
+                )?,
+            };
+            if let Some(session) = pending {
+                let original_target = crate::maintenance::recovery_target(&manifest, &session)?;
+                if let Some(requested) = &args.install_dir {
+                    ensure!(
+                        resources::same_path(requested, &original_target),
+                        "recovery cannot change the interrupted task directory"
+                    );
+                }
+                discovered_target = original_target;
+                args.operation = Operation::Recover;
+                args.recovery_session = Some(session);
+                args.install_dir = Some(discovered_target.clone());
+            } else if discovered_target.join(RECEIPT_NAME).try_exists()? {
+                let prior_version = crate::maintenance::installed_version(&discovered_target)?;
+                if prior_version == manifest.app_version {
+                    args.operation = Operation::Repair;
+                    args.install_dir = Some(discovered_target.clone());
+                } else if registered.is_some() {
+                    args.operation = Operation::Upgrade;
+                }
+            } else if registered.is_some() {
+                args.operation = Operation::Upgrade;
+            }
+        }
+        if matches!(args.operation, Operation::Repair | Operation::Recover) {
+            if let Some(registration) = &registered {
+                ensure!(
+                    resources::same_path(
+                        &discovered_target,
+                        Path::new(&registration.install_location)
+                    ),
+                    "maintenance cannot change the registered installation directory"
+                );
+            } else {
+                ensure!(
+                    args.install_dir.is_some(),
+                    "without registration, specify the original --install-dir for maintenance"
+                );
+            }
+            args.install_dir = Some(discovered_target.clone());
+            if args.operation == Operation::Repair {
+                let repair = crate::maintenance::repair_inputs(
+                    &manifest,
+                    &discovered_target,
+                    &transport::current_user_sid()?,
+                )?;
+                ensure!(
+                    repair.receipt.uninstaller_sha256.as_deref()
+                        == Some(backend.sha256()?.as_str()),
+                    "repair requires the exact original Rust backend package"
+                );
+                args.maintenance_details = repair.findings;
+            } else {
+                let session = match args.recovery_session.take() {
+                    Some(session) => std::path::absolute(session)?,
+                    None => crate::maintenance::pending_session(&manifest, &discovered_target)?
+                        .context("no interrupted Rust task found; pass --recovery-session")?,
+                };
+                let inspection = avelin_engine::inspect_recovery(
+                    &manifest,
+                    &discovered_target,
+                    &session,
+                    &transport::current_user_sid()?,
+                )?;
+                ensure!(inspection.verified, "recovery inspection was not verified");
+                args.maintenance_details = crate::maintenance::recovery_findings(&inspection);
+                args.recovery_session = Some(session);
+            }
+            validate_launch(&args)?;
         }
         if args.operation == Operation::Upgrade {
             let registration = registered.context("upgrade requires an installed product")?;
@@ -631,7 +835,7 @@ fn registry_key_exists(subkey: &str) -> Result<bool> {
     ensure!(!subkey.contains('\0'), "embedded NUL in registry path");
     let name: Vec<u16> = subkey.encode_utf16().chain(Some(0)).collect();
     let mut key = std::ptr::null_mut();
-    // Match the controlled NSIS script's explicit 64-bit HKCU registry view.
+    // Match the worker's explicit 64-bit HKCU registry view.
     let status = unsafe {
         RegOpenKeyExW(
             0x80000001u32 as i32 as isize as *mut c_void,
@@ -691,13 +895,48 @@ fn run(
     });
     install_root(&target)?;
     let user_sid = transport::current_user_sid()?;
-    let product_lock = AppLock::acquire(&manifest.app_id, &user_sid)?;
+    let mut product_lock = if args.operation == Operation::Recover {
+        // Recovery validates the old task and claims the engine's product mutex.
+        // Its new coordinator must not remove or overwrite the old task's lock.
+        AppLock::acquire(
+            &format!(
+                "{}-recovery-{}",
+                manifest.app_id,
+                uuid::Uuid::new_v4().simple()
+            ),
+            &user_sid,
+        )?
+    } else {
+        AppLock::acquire(&manifest.app_id, &user_sid)?
+    };
     let registry_key = format!(
         r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Avelin.M0.{}",
         manifest.app_id
     );
     let manifest_hash = hash_bytes(&serde_json::to_vec(&manifest)?);
-    crate::upgrade::ensure_no_pending(&target)?;
+    let recovery_preflight = if args.operation == Operation::Recover {
+        Some(avelin_engine::inspect_recovery(
+            &manifest,
+            &target,
+            args.recovery_session
+                .as_deref()
+                .context("recovery session required")?,
+            &user_sid,
+        )?)
+    } else {
+        crate::upgrade::ensure_no_pending(&target)?;
+        None
+    };
+    let repair_inputs = if args.operation == Operation::Repair {
+        let repair = crate::maintenance::repair_inputs(&manifest, &target, &user_sid)?;
+        ensure!(
+            repair.receipt.uninstaller_sha256.as_deref() == Some(backend.sha256()?.as_str()),
+            "repair backend differs from the original installation"
+        );
+        Some(repair)
+    } else {
+        None
+    };
     let previous = if args.operation == Operation::Upgrade {
         Some(crate::upgrade::prepare(
             &manifest,
@@ -721,6 +960,14 @@ fn run(
             None
         }
         Operation::Upgrade => None,
+        Operation::Recover => None,
+        Operation::Repair => Some(
+            repair_inputs
+                .as_ref()
+                .expect("repair inputs checked")
+                .receipt
+                .clone(),
+        ),
         Operation::Uninstall => {
             let (receipt, receipt_hash) =
                 resources::read_receipt_with_hash(&manifest, &target, &user_sid)?;
@@ -741,26 +988,23 @@ fn run(
                 "installed manifest does not match the package"
             );
             internal_hashes = vec![
-                ("receipt_sha256", RECEIPT_NAME, receipt_hash),
+                (RECEIPT_NAME, receipt_hash),
                 (
-                    "uninstaller_sha256",
                     "uninstall.exe",
                     receipt
                         .uninstaller_sha256
                         .clone()
                         .context("receipt has no uninstaller integrity record")?,
                 ),
-                ("runtime_sha256", ".avelin/avelin-app.exe", runtime_hash),
-                (
-                    "manifest_sha256",
-                    ".avelin/manifest.json",
-                    installed_manifest.sha256()?,
-                ),
+                (".avelin/avelin-app.exe", runtime_hash),
+                (".avelin/manifest.json", installed_manifest.sha256()?),
             ];
             Some(receipt)
         }
     };
-    let (desktop, start_menu) = if let Some(receipt) = &existing_receipt {
+    let (desktop, start_menu) = if args.operation == Operation::Recover {
+        (false, false)
+    } else if let Some(receipt) = &existing_receipt {
         (
             receipt
                 .shortcuts
@@ -801,10 +1045,28 @@ fn run(
         &hooks,
     )?;
     // Publish allocated locations before candidate/configuration writes can
-    // fail. A location alone does not claim the report exists or NSIS started.
+    // fail. A location alone does not claim the report exists or the worker started.
     let task = locations.task_id;
     let session = locations.session_dir;
     let report_path = locations.report_path;
+    ensure!(
+        !session.to_string_lossy().contains(['\r', '\n', '\0']),
+        "invalid task evidence path"
+    );
+    product_lock.seal(&session, &target)?;
+    let _prior_receipt_guard = if let Some(repair) = &repair_inputs {
+        resources::confirm_owned_hash(
+            &target.join(RECEIPT_NAME),
+            &hash_bytes(&repair.receipt_bytes),
+        )?;
+        Some(execution_files::create_file(
+            &execution_directory,
+            "prior-receipt.json",
+            &repair.receipt_bytes,
+        )?)
+    } else {
+        None
+    };
     let mut plan = if let Some(previous) = &previous {
         let payload_bytes = manifest.files.iter().try_fold(0u64, |sum, item| {
             sum.checked_add(item.size)
@@ -889,7 +1151,7 @@ fn run(
         uuid::Uuid::new_v4().simple().to_string() + &uuid::Uuid::new_v4().simple().to_string();
     let pipe = format!(r"\\.\pipe\avelin-m0-{}", uuid::Uuid::new_v4().simple());
     let candidate = session.join("receipt-candidate.json");
-    let receipt = existing_receipt.unwrap_or_else(|| Receipt {
+    let mut receipt = existing_receipt.unwrap_or_else(|| Receipt {
         schema_version: SCHEMA_VERSION,
         app_id: plan.app_id.clone(),
         app_version: plan.app_version.clone(),
@@ -911,6 +1173,14 @@ fn run(
         },
         previous_commit_id: previous.as_ref().map(|p| p.receipt.commit_id.clone()),
     });
+    if args.operation == Operation::Repair {
+        // Repaired shortcuts can have new bytes. Publish a new receipt commit
+        // linked to the verified prior receipt instead of reusing its identity.
+        receipt.previous_commit_id = Some(receipt.commit_id.clone());
+        receipt.commit_id = uuid::Uuid::new_v4().to_string();
+        receipt.task_id = task.clone();
+        receipt.uninstaller_sha256 = None;
+    }
     let _candidate_guard = execution_files::create_file(
         &execution_directory,
         "receipt-candidate.json",
@@ -934,6 +1204,21 @@ fn run(
     if let Some(point) = &args.engine_pause {
         config.push_str(&format!("engine_pause={point}\r\n"));
     }
+    if let Some(original) = &args.recovery_session {
+        ensure!(
+            !original.to_string_lossy().contains(['\r', '\n', '\0']),
+            "invalid recovery session path"
+        );
+        config.push_str(&format!(
+            "recovery_session={}\r\nrecovery_apply={}\r\n",
+            original.display(),
+            u8::from(args.recovery_apply)
+        ));
+    }
+    config.push_str(&format!(
+        "repair_overwrite={}\r\n",
+        u8::from(args.repair_overwrite)
+    ));
     let shortcut_evidence = session.join("shortcuts.ini");
     ensure!(
         !shortcut_evidence.exists(),
@@ -956,58 +1241,14 @@ fn run(
         target.display(),
         shortcut_evidence.display()
     ));
-    for (field, relative, expected_hash) in internal_hashes {
-        let hash = resources::confirm_owned_hash(&target.join(relative), &expected_hash)?;
-        config.push_str(&format!("{field}={hash}\r\n"));
+    for (relative, expected_hash) in internal_hashes {
+        resources::confirm_owned_hash(&target.join(relative), &expected_hash)?;
     }
     let mut _upgrade_inputs = Vec::new();
     if let Some(previous) = &previous {
-        let upgrade = plan.upgrade.as_ref().context("upgrade plan missing")?;
-        let mut execution_plan = format!(
-            "[upgrade]\r\nold_count={}\r\n[old]\r\n",
-            previous.backup.len()
-        );
-        for (index, item) in previous.backup.iter().enumerate() {
+        for item in &previous.backup {
             resources::confirm_owned_hash(&item.path, &item.sha256)?;
-            execution_plan.push_str(&format!(
-                "path{index}={}\r\nhash{index}={}\r\n",
-                item.path.display(),
-                item.sha256
-            ));
         }
-        let mut old_directories = std::collections::BTreeSet::new();
-        for file in &previous.manifest.files {
-            let mut parent = Path::new(&file.path).parent();
-            while let Some(path) = parent.filter(|path| !path.as_os_str().is_empty()) {
-                old_directories.insert(path.to_string_lossy().into_owned());
-                parent = path.parent();
-            }
-        }
-        let mut old_directories: Vec<_> = old_directories.into_iter().collect();
-        old_directories.sort_by_key(|path| std::cmp::Reverse(Path::new(path).components().count()));
-        execution_plan.push_str(&format!(
-            "[old_directories]\r\ncount={}\r\n",
-            old_directories.len()
-        ));
-        for (index, path) in old_directories.iter().enumerate() {
-            execution_plan.push_str(&format!("path{index}={path}\r\n"));
-        }
-        _upgrade_inputs.push(ini(
-            &execution_directory,
-            "upgrade-plan.ini",
-            &execution_plan,
-        )?);
-        let journal = session.join("upgrade-journal.jsonl");
-        let marker = json!({"schema_version":1,"task_id":task,"app_id":manifest.app_id,
-            "installation_id":receipt.installation_id,"previous_commit_id":previous.receipt.commit_id,
-            "new_commit_id":receipt.commit_id,"session_dir":session,"journal":journal,
-            "previous_receipt_sha256":previous.receipt_sha256,"new_manifest_sha256":manifest_hash,
-            "notice":"Unfinished upgrade: inspect recorded evidence. Do not automatically rerun or remove this marker."});
-        _upgrade_inputs.push(execution_files::create_file(
-            &execution_directory,
-            "upgrade-marker-candidate.json",
-            &serde_json::to_vec_pretty(&marker)?,
-        )?);
         let inventory = json!({"schema_version":1,"task_id":task,"backup":previous.backup,"preserved":previous.preserved,"registration":previous.registration});
         _upgrade_inputs.push(execution_files::create_file(
             &execution_directory,
@@ -1037,9 +1278,6 @@ fn run(
                 &input.read_bytes()?,
             )?);
         }
-        config.push_str(&format!("upgrade=1\r\nupgrade_plan={}\r\nupgrade_staging_dir={}\r\nupgrade_backup_dir={}\r\nupgrade_journal={}\r\nupgrade_marker_candidate={}\r\n",
-            session.join("upgrade-plan.ini").display(), upgrade.staging_dir.display(), upgrade.backup_dir.display(),
-            journal.display(), session.join("upgrade-marker-candidate.json").display()));
     }
     let _configuration_guard = ini(&execution_directory, "task.ini", &config)?;
     let server = transport::PipeServer::bind(&pipe, &token, &task)?;
@@ -1047,7 +1285,7 @@ fn run(
         // Copy the known installed uninstaller to the session, bypass its extra bootstrap child.
         let copy =
             execution_files::copy_file(&execution_directory, "uninstall-runner.exe", &backend)?;
-        // NSIS must be able to remove the installed source and its parents.
+        // The worker must be able to remove the installed source and its parents.
         drop(backend);
         Arc::new(copy)
     } else {
@@ -1064,12 +1302,6 @@ fn run(
         .stderr(Stdio::null());
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x08000000);
-    if args.operation == Operation::Uninstall {
-        use std::os::windows::process::CommandExt;
-        // NSIS requires _?= to be last and unquoted, even when the directory has spaces.
-        // install_root rejects quotes/control characters; Command does not invoke a shell.
-        command.raw_arg(format!("_?={}", target.display()));
-    }
     ensure!(
         !hooks
             .as_ref()
@@ -1261,8 +1493,97 @@ fn run(
                 TaskResult::Unknown
             }
         };
+        let mut repair_evidence = None;
+        let mut recovery_evidence = None;
         if result == TaskResult::Succeeded {
-            let verified = if let Some(previous) = &previous {
+            let verified = if args.operation == Operation::Recover {
+                (|| -> Result<()> {
+                    let input = PinnedFile::open(&session.join("recovery-report.json"))?;
+                    let report: avelin_engine::RecoveryReport =
+                        serde_json::from_slice(&input.read_bytes()?)?;
+                    let preflight = recovery_preflight
+                        .as_ref()
+                        .context("recovery preflight missing")?;
+                    ensure!(
+                        report.schema_version == 1
+                            && report.verified
+                            && report.original_task_id == preflight.original_task_id
+                            && report.applied == args.recovery_apply,
+                        "recovery report differs from the checked task or requested action"
+                    );
+                    let verified = avelin_engine::inspect_recovery(
+                        &manifest,
+                        &target,
+                        args.recovery_session
+                            .as_deref()
+                            .context("original recovery session missing")?,
+                        &plan.user_sid,
+                    )?;
+                    verify_recovery_outcome(&report, &verified, args.recovery_apply)?;
+                    message = if args.recovery_apply {
+                        if args.english {
+                            "Recovery completed and independently verified.".into()
+                        } else {
+                            "恢复已完成，并已独立核验。".into()
+                        }
+                    } else if args.english {
+                        "Recovery check passed; no installation resources were changed. Use --recovery-apply to apply.".into()
+                    } else {
+                        "恢复检查通过，安装资源未改变；执行恢复需使用 --recovery-apply。".into()
+                    };
+                    recovery_evidence = Some(serde_json::to_value(report)?);
+                    Ok(())
+                })()
+            } else if args.operation == Operation::Repair {
+                (|| -> Result<()> {
+                    let input = PinnedFile::open(&session.join("repair-report.json"))?;
+                    let report: avelin_engine::RepairReport =
+                        serde_json::from_slice(&input.read_bytes()?)?;
+                    let verified =
+                        avelin_engine::verify_repair(&manifest, &target, &plan.user_sid)?;
+                    let committed = resources::read_receipt(&manifest, &target, &plan.user_sid)?;
+                    ensure!(
+                        committed.task_id == receipt.task_id
+                            && committed.commit_id == receipt.commit_id
+                            && committed.installation_id == receipt.installation_id
+                            && committed.previous_commit_id == receipt.previous_commit_id,
+                        "repair receipt does not bind this task to its prior installation commit"
+                    );
+                    ensure!(
+                        report.schema_version == 1
+                            && report.task_id == task
+                            && report.fully_repaired == verified.fully_repaired
+                            && report
+                                .preserved
+                                .iter()
+                                .collect::<std::collections::BTreeSet<_>>()
+                                == verified
+                                    .preserved
+                                    .iter()
+                                    .collect::<std::collections::BTreeSet<_>>(),
+                        "repair outcome does not match independent resource verification"
+                    );
+                    message = if report.fully_repaired {
+                        if args.english {
+                            "Repair complete: all managed resources were verified.".into()
+                        } else {
+                            "完整修复：所有受管资源已核验。".into()
+                        }
+                    } else if args.english {
+                        format!(
+                            "Repair finished with {} modified resources preserved. These items were not repaired.",
+                            report.preserved.len()
+                        )
+                    } else {
+                        format!(
+                            "修复流程完成，保留 {} 项已修改资源；这些项目未修复。",
+                            report.preserved.len()
+                        )
+                    };
+                    repair_evidence = Some(serde_json::to_value(report)?);
+                    Ok(())
+                })()
+            } else if let Some(previous) = &previous {
                 verify_upgrade_result(
                     &target,
                     &manifest,
@@ -1369,7 +1690,30 @@ fn run(
         let upgrade_evidence = previous.as_ref().map(|previous| json!({"previous_version":previous.manifest.app_version,"new_version":manifest.app_version,
             "installation_id":receipt.installation_id,"previous_commit_id":previous.receipt.commit_id,"commit_id":receipt.commit_id,
             "journal":session.join("upgrade-journal.jsonl"),"backup":session.join("backup"),"marker":target.join(crate::upgrade::MARKER)}));
+        let maintenance_status = if result == TaskResult::Succeeded {
+            match args.operation {
+                Operation::Repair => Some(
+                    if repair_evidence
+                        .as_ref()
+                        .is_some_and(|report| report["fully_repaired"] == true)
+                    {
+                        "RepairComplete"
+                    } else {
+                        "RepairPreservedConflicts"
+                    },
+                ),
+                Operation::Recover => Some(if args.recovery_apply {
+                    "RecoveryComplete"
+                } else {
+                    "RecoveryChecked"
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let report = json!({"task_id":task,"operation":plan.operation,"result":result,"exit_code":child_exit,"coordinator_exit_code":code,"message":message,"backend_terminal_detail":backend_detail,"preserved_resources":preserved_resources,"upgrade":upgrade_evidence,
+        "repair":repair_evidence,"recovery":recovery_evidence,"maintenance_status":maintenance_status,
         "backend_pid":backend_guard.child.id(),"product_lock_retained":child_exit.is_none(),
         "elapsed_ms":started.elapsed().as_millis(),"observation_timeout_secs":args.observation_timeout_secs,"install_dir":target,"session_dir":session,"report_path":report_path,"diagnostic":diagnostic,"events":events,"cancellation":cancellation,"protocol_fault":backend_events.protocol_fault(),"signed":false});
         let saved_report =
@@ -1391,6 +1735,22 @@ fn run(
         Ok(code)
     })();
     execution.context(UnconfirmedExecution)
+}
+
+fn verify_recovery_outcome(
+    report: &avelin_engine::RecoveryReport,
+    verified: &avelin_engine::RecoveryInspection,
+    apply: bool,
+) -> Result<()> {
+    ensure!(
+        verified.verified && verified.original_task_id == report.original_task_id,
+        "recovered state could not be independently verified"
+    );
+    ensure!(
+        !apply || verified.decision == "already_recovered",
+        "recovery reported success without independently verified completion evidence"
+    );
+    Ok(())
 }
 
 fn persist_and_publish_report(
@@ -1424,10 +1784,9 @@ fn verify_result(
     shortcut_evidence: &Path,
 ) -> Result<()> {
     if operation == Operation::Install {
-        let target_guard = PinnedDirectory::open(target)?;
+        let _target_guard = PinnedDirectory::open(target)?;
         let receipt_input = PinnedFile::open(&target.join(RECEIPT_NAME))?;
-        let original_receipt_hash = receipt_input.sha256()?;
-        let mut receipt: Receipt = serde_json::from_slice(&receipt_input.read_bytes()?)?;
+        let receipt: Receipt = serde_json::from_slice(&receipt_input.read_bytes()?)?;
         ensure!(
             receipt.schema_version == SCHEMA_VERSION
                 && receipt.task_id == expected.task_id
@@ -1458,29 +1817,11 @@ fn verify_result(
         );
         let actual_uninstaller_hash = uninstaller.sha256()?;
         let actual_shortcuts = resources::verified_shortcuts(shortcuts, shortcut_evidence)?;
-        if let Some(expected_hash) = &receipt.uninstaller_sha256 {
-            // Native workers publish a complete receipt as their final resource.
-            ensure!(
-                expected_hash == &actual_uninstaller_hash && receipt.shortcuts == actual_shortcuts,
-                "published receipt does not describe the actual uninstall resources"
-            );
-        } else {
-            // Preserve the original NSIS receipt contract: its generated
-            // uninstaller is independently bound after backend completion.
-            ensure!(
-                receipt.shortcuts.is_empty(),
-                "partial shortcut ownership receipt"
-            );
-            receipt.uninstaller_sha256 = Some(actual_uninstaller_hash);
-            receipt.shortcuts = actual_shortcuts;
-            drop(receipt_input);
-            execution_files::update_existing_file(
-                &target_guard,
-                RECEIPT_NAME,
-                &original_receipt_hash,
-                &serde_json::to_vec_pretty(&receipt)?,
-            )?;
-        }
+        ensure!(
+            receipt.uninstaller_sha256.as_deref() == Some(actual_uninstaller_hash.as_str())
+                && receipt.shortcuts == actual_shortcuts,
+            "published receipt does not describe the actual uninstall resources"
+        );
         let installed = PinnedFile::open(&target.join(".avelin/manifest.json"))?;
         let installed_manifest: Manifest = serde_json::from_slice(&installed.read_bytes()?)?;
         ensure!(
@@ -1652,6 +1993,8 @@ fn ui_options(args: &Args, m: Option<&Manifest>) -> avelin_ui::UiOptions {
     let dark = presentation.theme == avelin_core::presentation::ThemeMode::Dark;
     avelin_ui::UiOptions {
         operation: args.operation.into(),
+        maintenance_details: args.maintenance_details.clone(),
+        repair_overwrite: args.repair_overwrite,
         previous_version: if args.operation == Operation::Upgrade {
             args.install_dir
                 .as_deref()
@@ -1697,7 +2040,7 @@ fn user_locale_tag() -> Option<String> {
     }
     None
 }
-/// Merge the UI result only after the coordinator has finished observing NSIS.
+/// Merge the UI result only after the coordinator has finished observing the Rust worker.
 /// Keep the task outcome as context rather than replacing it with a UI error code.
 #[cfg(any(feature = "gui", test))]
 fn merge_gui_outcome(
@@ -1850,7 +2193,7 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
             if launch_pending && task_code.is_some() {
                 launch_pending = false;
                 let result = if task_code == Some(0)
-                    && args.operation != Operation::Uninstall
+                    && !matches!(args.operation, Operation::Uninstall | Operation::Recover)
                     && !launched
                 {
                     task_locations_snapshot(&dispatcher_locations)
@@ -1893,7 +2236,10 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                     }
                 }
                 UiCommand::LaunchInstalled => {
-                    if started && !launched && args.operation != Operation::Uninstall {
+                    if started
+                        && !launched
+                        && !matches!(args.operation, Operation::Uninstall | Operation::Recover)
+                    {
                         launch_pending = true;
                     } else {
                         let _ = response_sender.send(TaskResponse::LaunchResult {
@@ -1924,9 +2270,14 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                     started_target = Some(install_dir.clone());
                     let mut args = args.clone();
                     args.install_dir = Some(install_dir);
-                    if args.operation != Operation::Uninstall {
+                    if matches!(args.operation, Operation::Install | Operation::Upgrade) {
                         args.desktop_shortcut = Some(desktop_shortcut);
                         args.start_menu_shortcut = Some(start_menu_shortcut);
+                    }
+                    if args.operation == Operation::Recover {
+                        // This command arrives only after the recovery page's
+                        // explicit confirmation. Silent checks never take it.
+                        args.recovery_apply = true;
                     }
                     // A retained dispatcher clone would prevent removal of the installed uninstaller.
                     let backend = backend.take().expect("one backend per task");
@@ -2017,7 +2368,7 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
         }
         dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         dispatcher_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
-        // NSIS observation is bounded; the worker must publish its report and drop
+        // Worker observation is bounded; the worker must publish its report and drop
         // its guard before main may exit. Blocking local disk I/O is not preempted.
         worker
             .map(|worker| {
@@ -2071,6 +2422,156 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_rejects_non_rust_workers_before_creating_installation_state() {
+        let directory =
+            execution_files::create_private_session(&std::env::temp_dir(), "avelin-worker-test")
+                .unwrap();
+        let folder = directory.path().to_path_buf();
+        let backend =
+            execution_files::create_file(&directory, "external.exe", b"inert executable").unwrap();
+        let manifest = execution_files::create_file(
+            &directory,
+            "manifest.json",
+            include_bytes!("../../../docs/schemas/examples/manifest.json"),
+        )
+        .unwrap();
+        let target = folder.join("installed");
+        let report = folder.join("report.json");
+        let args = Args::try_parse_from([
+            "avelin-app",
+            "--silent",
+            "--backend",
+            backend.path().to_str().unwrap(),
+            "--manifest",
+            manifest.path().to_str().unwrap(),
+            "--install-dir",
+            target.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = entry(args).unwrap_err();
+        assert!(error.to_string().contains("only a packaged Rust worker"));
+        assert!(!target.exists());
+        assert!(!report.exists());
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 2);
+        drop(backend);
+        drop(manifest);
+        drop(directory);
+        fs::remove_file(folder.join("external.exe")).unwrap();
+        fs::remove_file(folder.join("manifest.json")).unwrap();
+        fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn uninstall_acceptance_only_allows_removal_and_commit_pauses() {
+        let parse = |extra: &[&str]| {
+            let mut command = vec![
+                "avelin-app",
+                "--silent",
+                "--operation",
+                "uninstall",
+                "--install-dir",
+                r"C:\installed",
+            ];
+            if extra.contains(&"--ui-demo") {
+                command.retain(|argument| *argument != "--silent");
+            }
+            command.extend_from_slice(extra);
+            Args::try_parse_from(command).unwrap()
+        };
+        assert!(validate_launch(&parse(&["--engine-pause", "after-first-remove"])).is_ok());
+        assert!(validate_launch(&parse(&["--engine-pause", "after-commit"])).is_ok());
+        for point in [
+            "prepared",
+            "after-first-publish",
+            "recovery-after-first-mutation",
+        ] {
+            assert!(validate_launch(&parse(&["--engine-pause", point])).is_err());
+        }
+        assert!(validate_launch(&parse(&["--engine-fault", "before-commit"])).is_err());
+        assert!(
+            validate_launch(&parse(&[
+                "--engine-pause",
+                "after-first-remove",
+                "--engine-fault",
+                "before-commit"
+            ]))
+            .is_err()
+        );
+        assert!(
+            validate_launch(&parse(&[
+                "--engine-pause",
+                "after-first-remove",
+                "--ui-demo"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_apply_requires_independently_verified_completion() {
+        let report = avelin_engine::RecoveryReport {
+            schema_version: 1,
+            original_task_id: "original-task".into(),
+            decision: "rollback".into(),
+            applied: true,
+            verified: true,
+            restored: vec![],
+            preserved: vec![],
+        };
+        let mut verified = report.clone();
+        for pending in ["rollback", "confirm_committed"] {
+            verified.decision = pending.into();
+            assert!(verify_recovery_outcome(&report, &verified, true).is_err());
+            assert!(verify_recovery_outcome(&report, &verified, false).is_ok());
+        }
+        verified.decision = "already_recovered".into();
+        assert!(verify_recovery_outcome(&report, &verified, true).is_ok());
+        assert!(verify_recovery_outcome(&report, &verified, false).is_ok());
+        verified.verified = false;
+        assert!(verify_recovery_outcome(&report, &verified, true).is_err());
+        verified.verified = true;
+        verified.original_task_id = "different-task".into();
+        assert!(verify_recovery_outcome(&report, &verified, true).is_err());
+    }
+
+    #[test]
+    fn sealed_product_lock_allows_worker_reads_but_denies_mutation() {
+        let folder = std::env::temp_dir().join(format!("avelin-lock-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&folder).unwrap();
+        let path = folder.join("product.lock");
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        writeln!(writer, "{}", std::process::id()).unwrap();
+        let mut lock = AppLock {
+            _file: Some(writer),
+            path: path.clone(),
+            retain: false,
+        };
+        lock.seal(&folder.join("session"), &folder.join("installed"))
+            .unwrap();
+        // Match the worker's restrictive read sharing, not fs::read's defaults.
+        let mut reader = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let mut contents = String::new();
+        std::io::Read::read_to_string(&mut reader, &mut contents).unwrap();
+        assert!(contents.contains("\nsession="));
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        assert!(fs::remove_file(&path).is_err());
+        drop(reader);
+        drop(lock);
+        assert!(!path.exists());
+        fs::remove_dir(folder).unwrap();
+    }
 
     #[test]
     fn registration_query_only_treats_missing_key_as_absent() {
@@ -2300,7 +2801,7 @@ mod tests {
             .open(&lock_path)
             .unwrap();
         // Null stdin gives the existing fixture EOF. It exits naturally without
-        // NSIS, installation changes, or process termination.
+        // installation changes or process termination.
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -2317,7 +2818,7 @@ mod tests {
         BackendGuard {
             child,
             lock: AppLock {
-                _file: file,
+                _file: Some(file),
                 path: lock_path,
                 retain: false,
             },
@@ -2561,6 +3062,67 @@ mod tests {
             validate_launch(&gui_uninstall).is_ok(),
             cfg!(feature = "gui")
         );
+    }
+
+    #[test]
+    fn maintenance_flags_require_explicit_operations_and_never_infer_apply() {
+        for extra in [
+            vec!["--repair-overwrite"],
+            vec!["--recovery-apply"],
+            vec!["--recovery-session", r"C:\old-task"],
+        ] {
+            let mut argv = vec!["avelin-app", "--silent"];
+            argv.extend(extra);
+            assert!(validate_launch(&Args::try_parse_from(argv).unwrap()).is_err());
+        }
+        let check = Args::try_parse_from([
+            "avelin-app",
+            "--silent",
+            "--operation",
+            "recover",
+            "--recovery-session",
+            r"C:\old-task",
+        ])
+        .unwrap();
+        validate_launch(&check).unwrap();
+        assert!(!check.recovery_apply);
+        assert!(!requests_gui(&check));
+        let apply = Args::try_parse_from([
+            "avelin-app",
+            "--silent",
+            "--operation",
+            "recover",
+            "--recovery-session",
+            r"C:\old-task",
+            "--recovery-apply",
+        ])
+        .unwrap();
+        validate_launch(&apply).unwrap();
+        assert!(apply.recovery_apply);
+        let repair = Args::try_parse_from([
+            "avelin-app",
+            "--silent",
+            "--operation",
+            "repair",
+            "--repair-overwrite",
+        ])
+        .unwrap();
+        validate_launch(&repair).unwrap();
+        assert!(repair.repair_overwrite);
+        for operation in ["repair", "recover"] {
+            for extra in ["--desktop-shortcut", "--start-menu-shortcut", "--ui-demo"] {
+                let args = Args::try_parse_from([
+                    "avelin-app",
+                    "--operation",
+                    operation,
+                    "--install-dir",
+                    r"C:\original",
+                    extra,
+                ])
+                .unwrap();
+                assert!(validate_launch(&args).is_err());
+            }
+        }
     }
 
     #[test]
@@ -2882,7 +3444,7 @@ mod tests {
             let guard = BackendGuard {
                 child,
                 lock: AppLock {
-                    _file: file,
+                    _file: Some(file),
                     path: lock_path.clone(),
                     retain: false,
                 },

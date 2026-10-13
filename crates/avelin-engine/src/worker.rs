@@ -119,6 +119,9 @@ fn run() -> Result<i32> {
             step_delay_ms: ini.number("step_delay_ms")?,
             fault_point: ini.optional("engine_fault"),
             pause_point: ini.optional("engine_pause"),
+            recovery_session: ini.optional("recovery_session").map(Path::new),
+            recovery_apply: ini.optional("recovery_apply") == Some("1"),
+            repair_overwrite: ini.optional("repair_overwrite") == Some("1"),
         };
         avelin_engine::execute(request, &mut observer)
     })();
@@ -181,7 +184,7 @@ fn launch_installed_uninstaller() -> Result<i32> {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| avelin_core::same_windows_name(name, "uninstall.exe")),
-        "use avelin-cli build --engine rust to package this internal worker"
+        "use avelin-cli build to package this internal worker"
     );
     let root = executable.parent().context("installed worker parent")?;
     avelin_core::install_root(root)?;

@@ -148,7 +148,7 @@ directory_name = "AvelinM1Fixture"
 "#;
         let path = fixture.0.join("avelin.toml");
         fs::write(&path, base).unwrap();
-        let (_, legacy) = crate::builder::load(&path).unwrap();
+        let (_, legacy) = crate::config::load(&path).unwrap();
         assert!(
             serde_json::to_value(&legacy)
                 .unwrap()
@@ -156,7 +156,7 @@ directory_name = "AvelinM1Fixture"
                 .is_none()
         );
         fs::write(&path, format!("{base}\n[ui]\naccent_color='#245DA8'\nlocale='en-US'\nlogo='logo.png'\nstrings_dir='locales'\n")).unwrap();
-        let (_, manifest) = crate::builder::load(&path).unwrap();
+        let (_, manifest) = crate::config::load(&path).unwrap();
         let decoded: avelin_core::Manifest =
             serde_json::from_slice(&serde_json::to_vec(&manifest).unwrap()).unwrap();
         decoded.validate().unwrap();

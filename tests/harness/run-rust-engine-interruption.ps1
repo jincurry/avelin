@@ -14,7 +14,9 @@ param(
     [Parameter(Mandatory)][string]$RustWorker,
     [Parameter(Mandatory)][string]$OutputRoot,
     [string]$Sample = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'examples/nimbus/payload/nimbus-demo.exe'),
-    [ValidateRange(30, 1800)][int]$TimeoutSeconds = 180
+    [ValidateRange(30, 1800)][int]$TimeoutSeconds = 180,
+    # Internal reuse by the maintenance harness; define helpers without running cases.
+    [switch]$FunctionsOnly
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -145,7 +147,6 @@ function StartFixtureProcess([string]$Executable, [string[]]$Arguments, [string]
     $info.WorkingDirectory = $script:CaseRoot; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     $info.StandardOutputEncoding = $script:Utf8; $info.StandardErrorEncoding = $script:Utf8
     $info.Environment['LOCALAPPDATA'] = $script:LocalRoot; $info.Environment['TEMP'] = $script:TempRoot; $info.Environment['TMP'] = $script:TempRoot
-    $null = $info.Environment.Remove('NSIS_MAKENSIS'); $null = $info.Environment.Remove('NSISDIR')
     foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $info
     $null = $process.Start()
@@ -177,7 +178,7 @@ function InvokeFixtureProcess([string]$Executable, [string[]]$Arguments, [string
     $running = StartFixtureProcess $Executable $Arguments $Label
     FinishFixtureProcess $running $ExpectedExit $AwaitReport
 }
-function BuildPackage([string]$Label, [string]$Version) {
+function BuildPackage([string]$Label, [string]$Version, [switch]$Shortcuts) {
     $project = Inside (Join-Path $script:CaseRoot "project-$Label") $script:RunRoot
     $payload = Join-Path $project 'payload'; $null = [IO.Directory]::CreateDirectory($payload)
     [IO.File]::Copy($script:SampleBinary, (Join-Path $payload 'app.exe'), $false)
@@ -186,6 +187,7 @@ function BuildPackage([string]$Label, [string]$Version) {
     if ($Version -ceq '1.0.0') { WriteNew (Join-Path $payload 'retired.txt') 'Old owned resource' }
     else { WriteNew (Join-Path $payload 'new.txt') 'New owned resource' }
     $config = Join-Path $project 'avelin.toml'
+    $shortcutDefault = if ($Shortcuts) { 'true' } else { 'false' }
     WriteNew $config @"
 schema_version = 1
 [app]
@@ -197,11 +199,11 @@ entry = "app.exe"
 directory = "payload"
 [install]
 directory_name = "AvelinInterruptionFixture"
-desktop_shortcut = false
-start_menu_shortcut = false
+desktop_shortcut = $shortcutDefault
+start_menu_shortcut = $shortcutDefault
 "@
     $setup = Join-Path $script:CaseRoot "$Label-Setup.exe"
-    InvokeFixtureProcess $script:CliBinary @('build', '--config', $config, '--output', $setup, '--engine', 'rust', '--runtime', $script:RuntimeBinary, '--rust-worker', $script:WorkerBinary) "build-$Label"
+    InvokeFixtureProcess $script:CliBinary @('build', '--config', $config, '--output', $setup, '--runtime', $script:RuntimeBinary, '--rust-worker', $script:WorkerBinary) "build-$Label"
     $built = Json (Join-Path $script:CaseRoot "build-$Label.stdout.log")
     Require ($built.engine -ceq 'rust') 'Requested native backend was not built'
     $manifest = Json ([IO.Path]::ChangeExtension($setup, 'manifest.json'))
@@ -276,6 +278,7 @@ function AssertPaused([object]$Evidence, [string]$Point, [object]$Baseline) {
     Save (Join-Path $script:CaseRoot 'pause.evidence.json') @{ pause = $Evidence.Pause; identity = $Evidence.Identity; journal = $journal; product = ProductSnapshot }
 }
 
+if ($FunctionsOnly) { return }
 Require ($IsWindows -and [Environment]::Is64BitProcess) 'Use Windows x64 PowerShell 7.2+'
 $projectRoot = Full (Join-Path $PSScriptRoot '../..')
 $script:RunRoot = Inside $OutputRoot (Join-Path $projectRoot 'target')

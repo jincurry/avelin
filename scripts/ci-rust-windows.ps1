@@ -3,11 +3,10 @@
 .SYNOPSIS
 Build, package and validate the Rust engine on a provisioned Windows host.
 .DESCRIPTION
-Uses installed tools only; never installs Rust, targets, NSIS, Python or SDKs.
+Uses installed tools only; never installs Rust, targets, Python or SDKs.
 Cargo may fetch dependencies selected by Cargo.lock. Builds current components,
-packages and extracts a Rust devkit, then runs all 19 lifecycle and 6 interruption
-cases against those extracted binaries. NSIS and the x86 bridge are required for
-the migration fixtures and shared license collector, not Rust installation.
+packages and extracts a Rust devkit, then runs all 17 lifecycle, 6 interruption and
+17 maintenance cases against those extracted binaries.
 OutputDirectory must be a new directory under this repository's target tree.
 Interrupted scenes, user-scoped test registrations and private evidence remain
 available for inspection; this entry never recursively deletes them. Interruption
@@ -17,7 +16,6 @@ No GUI automation, performance measurement, signing or tool installation.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [string]$NsisRoot = $env:AVELIN_NSIS_ROOT,
     [string]$RustToolchain = 'stable',
     [string]$ExpectedRustVersion,
     [string]$PythonPath = $env:AVELIN_PYTHON,
@@ -25,7 +23,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($env:CARGO_BUILD_TARGET) { throw 'Unset CARGO_BUILD_TARGET; this entry uses an x64 host and an explicit x86 bridge target.' }
+if ($env:CARGO_BUILD_TARGET) { throw 'Unset CARGO_BUILD_TARGET; this entry uses the x64 host target.' }
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runRoot = [IO.Path]::GetFullPath($OutputDirectory, $projectRoot)
 $targetRoot = Join-Path $projectRoot 'target'
@@ -96,19 +94,6 @@ function InvokeRecorded([string]$Name, [string]$Executable, [string[]]$Arguments
         return $stdout.Trim()
     } finally { $process.Dispose() }
 }
-function Inventory([string]$Root) {
-    $pending = [Collections.Generic.Stack[string]]::new(); $pending.Push($Root)
-    $rows = while ($pending.Count) {
-        $directory = Get-Item -LiteralPath $pending.Pop() -Force
-        Require (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "Tool directory contains a reparse point: $($directory.FullName)"
-        foreach ($item in Get-ChildItem -LiteralPath $directory.FullName -Force) {
-            Require (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "Tool tree contains a reparse point: $($item.FullName)"
-            if ($item.PSIsContainer) { $pending.Push($item.FullName) }
-            else { [pscustomobject]@{ path = [IO.Path]::GetRelativePath($Root, $item.FullName); size = $item.Length; sha256 = Hash $item.FullName } }
-        }
-    }
-    return @($rows | Sort-Object path)
-}
 function ReadJson([string]$Path) { Get-Content -LiteralPath $Path -Raw -Encoding utf8 | ConvertFrom-Json }
 function ReadUserShellFolders {
     foreach ($folder in @([Environment+SpecialFolder]::DesktopDirectory, [Environment+SpecialFolder]::Programs)) {
@@ -147,23 +132,13 @@ try {
         [pscustomobject]@{ name = $name; path = $path; sha256 = Hash $path }
     })
     $targets = InvokeRecorded 'rust-targets' $rustup @('target', 'list', '--installed', '--toolchain', $RustToolchain)
-    foreach ($target in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
+    foreach ($target in @('x86_64-pc-windows-msvc')) {
         Require (($targets -split '\r?\n') -contains $target) "Required Rust target is not installed: $target"
     }
     $pythonVersion = InvokeRecorded 'python-version' $python @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; print(sys.version)')
-    if (-not $NsisRoot) { throw 'Set -NsisRoot or AVELIN_NSIS_ROOT to the provisioned NSIS 3.12 directory.' }
-    $nsisRootPath = [IO.Path]::GetFullPath($NsisRoot, $projectRoot).TrimEnd([char]'\', [char]'/')
-    $makensis = Join-Path $nsisRootPath 'makensis.exe'
-    $compiler = Join-Path $nsisRootPath 'Bin/makensis.exe'
-    Require ((Hash $makensis) -ceq 'b043e554afefbfc56315669d0b4779793aeae67f0f2a7a790e2ea91f05298eff') 'NSIS launcher differs from reviewed 3.12 bytes.'
-    Require ((Hash $compiler) -ceq '25d1aa7081db1a9de9690b59983f9652b7409a189c3444328cc1841eff693e8d') 'NSIS actual compiler differs from reviewed 3.12 bytes.'
-    $nsisVersion = InvokeRecorded 'nsis-version' $makensis @('/VERSION')
-    Require ($nsisVersion -ceq 'v3.12') "Expected NSIS v3.12, observed $nsisVersion"
-    $nsisInventory = @(Inventory $nsisRootPath)
-    Save (Join-Path $runRoot 'nsis-source-inventory.json') $nsisInventory
-    $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion; nsis_version = $nsisVersion; nsis_root = $nsisRootPath; nsis_source_inventory_sha256 = Hash (Join-Path $runRoot 'nsis-source-inventory.json') }
+    $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/windows-shell-link.ps1')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/windows-shell-link.ps1')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })
@@ -179,20 +154,17 @@ try {
     $env:CARGO_TARGET_DIR = $targetDirectory
     $null = InvokeRecorded 'fmt' $rustup @('run', $RustToolchain, 'cargo', 'fmt', '--all', '--', '--check')
     # The verified toolchain host is x64 MSVC. Native-host output preserves the
-    # existing local Cargo cache layout; the bridge remains an explicit x86 target.
+    # existing local Cargo cache layout.
     $null = InvokeRecorded 'source-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '-p', 'avelin-core', '-p', 'avelin-ui', '-p', 'avelin-app', '-p', 'avelin-cli', '-p', 'avelin-engine', '--features', 'avelin-app/gui', '--', '--skip', 'manifest_validates_fifty_thousand_files_and_rejects_the_next')
-    $null = InvokeRecorded 'bridge-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '--target', 'i686-pc-windows-msvc', '-p', 'avelin-nsis-bridge')
     $null = InvokeRecorded 'host-release' $rustup @('run', $RustToolchain, 'cargo', 'build', '--locked', '--release', '-p', 'avelin-app', '-p', 'avelin-cli', '-p', 'avelin-engine', '--features', 'avelin-app/gui', '--bins')
-    $null = InvokeRecorded 'bridge-release' $rustup @('run', $RustToolchain, 'cargo', 'build', '--locked', '--release', '--target', 'i686-pc-windows-msvc', '-p', 'avelin-nsis-bridge')
     $hostRelease = Join-Path $env:CARGO_TARGET_DIR 'release'
     $components = [ordered]@{
         cli = Join-Path $hostRelease 'avelin-cli.exe'; runtime = Join-Path $hostRelease 'avelin-app.exe'
         rust_worker = Join-Path $hostRelease 'avelin-engine.exe'; sample = Join-Path $hostRelease 'nimbus-demo.exe'
-        bridge = Join-Path $env:CARGO_TARGET_DIR 'i686-pc-windows-msvc/release/avelin_nsis_bridge.dll'
     }
     $summary.components = @(foreach ($name in $components.Keys) { [pscustomobject]@{ name = $name; path = $components[$name]; sha256 = Hash $components[$name] } })
     $licenseDirectory = Join-Path $runRoot 'third-party'
-    $null = InvokeRecorded 'collect-licenses' $python @((Join-Path $projectRoot 'scripts/collect-third-party.py'), '--project-root', $projectRoot, '--nsis-root', $nsisRootPath, '--output', $licenseDirectory)
+    $null = InvokeRecorded 'collect-licenses' $python @((Join-Path $projectRoot 'scripts/collect-third-party.py'), '--project-root', $projectRoot, '--output', $licenseDirectory)
     $null = InvokeRecorded 'verify-licenses' $python @((Join-Path $projectRoot 'scripts/collect-third-party.py'), '--verify', $licenseDirectory)
     $packageOutput = Join-Path $runRoot 'package'
     $null = InvokeRecorded 'package' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'scripts/package-rust-devkit.ps1'), '-CliPath', $components.cli, '-RuntimePath', $components.runtime, '-RustWorkerPath', $components.rust_worker, '-SamplePath', $components.sample, '-LicenseDirectory', $licenseDirectory, '-OutputDirectory', $packageOutput)
@@ -254,19 +226,18 @@ try {
         verification = 'ZIP and extracted contents verified; lifecycle fixtures use these exact extracted runtime, worker, CLI and sample bytes.'
     }
     $lifecycleDirectory = Join-Path $runRoot 'lifecycle'
-    $null = InvokeRecorded 'rust-lifecycle' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-engine.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-Nsis', $makensis, '-Bridge', $components.bridge, '-OutputRoot', $lifecycleDirectory)
+    $null = InvokeRecorded 'rust-lifecycle' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-engine.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $lifecycleDirectory)
     $lifecycleReport = Join-Path $lifecycleDirectory 'summary.json'
     $lifecycle = ReadJson $lifecycleReport
-    Require ($lifecycle.status -ceq 'PASSED' -and $lifecycle.migration_requested -eq $true) 'Rust lifecycle did not pass with NSIS migration enabled.'
+    Require ($lifecycle.status -ceq 'PASSED') 'Rust lifecycle did not pass.'
     $expectedLifecycle = @(
         'install-collision', 'cancel-install', 'fail-install', 'install-a', 'same-version',
         'upgrade-collision', 'modified-replacement', 'modified-selected-shortcut',
         'upgrade-before-commit-restores-a', 'upgrade-b', 'launch-b', 'downgrade',
         'uninstall-b-preserves-user-edits', 'reinstall-collision', 'reinstall-and-direct-uninstall',
-        'nsis-to-rust-before-commit-restores-nsis', 'nsis-to-rust-normal-migration',
         'post-commit-confirmation-loss-preserves-committed-b', 'incomplete-rollback-diagnosis-and-reentry-refusal'
     )
-    Require (@($lifecycle.completed_cases).Count -eq $expectedLifecycle.Count) 'Lifecycle case count differs from the required 19 cases.'
+    Require (@($lifecycle.completed_cases).Count -eq $expectedLifecycle.Count) 'Lifecycle case count differs from the required 17 cases.'
     foreach ($case in $expectedLifecycle) {
         Require (@($lifecycle.completed_cases | Where-Object { $_ -ceq $case }).Count -eq 1) "Lifecycle case absent or duplicated: $case"
     }
@@ -278,11 +249,10 @@ try {
         Require ((Hash $fixtureBinary) -ceq (Hash $extractedComponents[$name])) "Lifecycle used a different component: $name"
         $lifecycleComponents[$name] = @{ path = $fixtureBinary; sha256 = Hash $fixtureBinary }
     }
-    Require ((Hash (Join-Path $lifecycleDirectory 'tools/avelin_nsis_bridge.dll')) -ceq (Hash $components.bridge)) 'Migration bridge differs from this source build.'
     $summary.lifecycle = @{
         status = $lifecycle.status; case_count = @($lifecycle.completed_cases).Count
         report = $lifecycleReport; report_sha256 = Hash $lifecycleReport
-        components = $lifecycleComponents; migration_required = $true
+        components = $lifecycleComponents
     }
     $interruptionDirectory = Join-Path $runRoot 'interruption'
     $null = InvokeRecorded 'rust-interruption' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-engine-interruption.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $interruptionDirectory)
@@ -306,6 +276,30 @@ try {
         report = $interruptionReport; report_sha256 = Hash $interruptionReport
         retained_scenes = $interruption.retained_scenes
     }
+    $maintenanceDirectory = Join-Path $runRoot 'maintenance'
+    $null = InvokeRecorded 'rust-maintenance' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-maintenance.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $maintenanceDirectory)
+    $maintenanceReport = Join-Path $maintenanceDirectory 'summary.json'
+    $maintenance = ReadJson $maintenanceReport
+    $maintenanceCases = @(
+        'recover-install-after-first-publish', 'recover-install-after-commit',
+        'recover-upgrade-after-first-publish', 'recover-upgrade-after-commit',
+        'recover-uninstall-after-first-remove', 'recover-uninstall-after-commit',
+        'recover-cli-check-read-only', 'recover-reject-foreign-user', 'recover-reject-tampered-evidence',
+        'recover-preserves-post-interruption-edit', 'repair-reject-pending-recovery', 'recover-interruption-retains-evidence',
+        'repair-missing-resources-preserves-modified', 'repair-reject-wrong-manifest', 'repair-reject-wrong-version',
+        'repair-explicit-overwrite-keeps-backup', 'repair-repeat-is-safe'
+    )
+    Require ($maintenance.status -ceq 'PASSED' -and @($maintenance.cases).Count -eq $maintenanceCases.Count) 'Rust maintenance did not pass all 17 required cases.'
+    foreach ($label in $maintenanceCases) {
+        $case = @($maintenance.cases | Where-Object { $_.label -ceq $label })
+        Require ($case.Count -eq 1 -and $case[0].status -ceq 'PASSED') "Maintenance case absent, duplicated or failed: $label"
+    }
+    Require (@($maintenance.components).Count -eq $extractedComponents.Count) 'Maintenance component count differs.'
+    foreach ($name in $extractedComponents.Keys) {
+        $record = @($maintenance.components | Where-Object { [string]::Equals([string]$_.path, $extractedComponents[$name], [StringComparison]::OrdinalIgnoreCase) })
+        Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Maintenance component does not match the extracted ZIP: $name"
+    }
+    $summary.maintenance = @{ status = $maintenance.status; case_count = @($maintenance.cases).Count; report = $maintenanceReport; report_sha256 = Hash $maintenanceReport }
     # Make sure validation left the distributable and extracted inputs unchanged.
     $finalVerification = (InvokeRecorded 'verify-kit-after-acceptance' $pwsh @('-NoProfile', '-File', (Join-Path $kitRoot 'Verify-RustDevKit.ps1'), '-KitDirectory', $kitRoot, '-ZipPath', $zipPath)) | ConvertFrom-Json
     Require ($finalVerification.verified -eq $true -and (Hash $zipPath) -ceq $zipHash) 'Package changed during acceptance.'
@@ -316,8 +310,6 @@ try {
     foreach ($record in $summary.harness_sources) {
         Require ((Hash (Join-Path $projectRoot $record.path)) -ceq $record.sha256) 'Acceptance harness changed during validation.'
     }
-    $finalInventory = @(Inventory $nsisRootPath)
-    Require (($finalInventory | ConvertTo-Json -Depth 5 -Compress) -ceq ($nsisInventory | ConvertTo-Json -Depth 5 -Compress)) 'NSIS source tree changed during validation.'
     $summary.package = $package
     $summary.status = 'PASSED'
 } catch {

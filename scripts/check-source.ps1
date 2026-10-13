@@ -3,9 +3,9 @@
 .SYNOPSIS
 Check formatting and run source tests without building or running an installer.
 .DESCRIPTION
-Requires an already installed Windows x64 MSVC Rust toolchain, rustfmt, both
-x64/x86 MSVC targets, Visual C++ build tools and Windows SDK. Cargo may fetch
-locked dependencies. This entry never installs tools, runs NSIS, opens a GUI,
+Requires an already installed Windows x64 MSVC Rust toolchain, rustfmt, the
+x64 MSVC target, Visual C++ build tools and Windows SDK. Cargo may fetch
+locked dependencies. This entry never installs tools, opens a GUI,
 or runs the ignored integration/performance tests. Existing output is preserved.
 #>
 [CmdletBinding()]
@@ -19,7 +19,7 @@ if (-not $IsWindows -or -not [Environment]::Is64BitProcess) {
     throw 'Use Windows x64 and PowerShell 7.2+.'
 }
 if ($RustToolchain -notmatch '^[A-Za-z0-9_.-]+$') { throw 'RustToolchain must name an installed rustup toolchain.' }
-if ($env:CARGO_BUILD_TARGET) { throw 'Unset CARGO_BUILD_TARGET; this entry uses an x64 host and an explicit x86 bridge target.' }
+if ($env:CARGO_BUILD_TARGET) { throw 'Unset CARGO_BUILD_TARGET; this entry uses the x64 host target.' }
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 if (-not $OutputDirectory) {
     $runName = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -32,7 +32,7 @@ $summary = [ordered]@{
     schema_version = 1; status = 'RUNNING'; started_at_utc = [DateTime]::UtcNow.ToString('o')
     rust_toolchain = $RustToolchain; output_directory = $runRoot
     installer_executed = $false; cloud_execution_claim = 'NOT_ASSERTED'
-    skipped = @('50000-file boundary test', 'ignored tests including real NSIS and timing probes')
+    skipped = @('50000-file boundary test', 'ignored integration and timing probes')
     commands = [Collections.Generic.List[object]]::new()
 }
 $oldToolchain = $env:RUSTUP_TOOLCHAIN
@@ -79,14 +79,13 @@ try {
     if ($version -notmatch '(?m)^host: x86_64-pc-windows-msvc\s*$') { throw 'Rust host must be x86_64-pc-windows-msvc.' }
     $summary.rustc_verbose = $version
     $targets = Invoke-Check 'installed-targets' $rustup @('target', 'list', '--installed', '--toolchain', $RustToolchain)
-    foreach ($target in @('x86_64-pc-windows-msvc', 'i686-pc-windows-msvc')) {
+    foreach ($target in @('x86_64-pc-windows-msvc')) {
         if (($targets -split '\r?\n') -notcontains $target) { throw "Install the $target target for $RustToolchain before retrying." }
     }
     $lockPath = Join-Path $projectRoot 'Cargo.lock'
     $summary.cargo_lock_sha256 = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $null = Invoke-Check 'fmt' $rustup @('run', $RustToolchain, 'cargo', 'fmt', '--all', '--', '--check')
     $null = Invoke-Check 'source-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '-p', 'avelin-core', '-p', 'avelin-ui', '-p', 'avelin-app', '-p', 'avelin-cli', '-p', 'avelin-engine', '--features', 'avelin-app/gui', '--', '--skip', 'manifest_validates_fifty_thousand_files_and_rejects_the_next')
-    $null = Invoke-Check 'bridge-tests' $rustup @('run', $RustToolchain, 'cargo', 'test', '--locked', '--target', 'i686-pc-windows-msvc', '-p', 'avelin-nsis-bridge')
     if ((Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $summary.cargo_lock_sha256) {
         throw 'Cargo.lock changed during source checks.'
     }

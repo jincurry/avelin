@@ -7,7 +7,7 @@ license does not replace those terms.
 - Cargo dependencies are locked in `Cargo.lock`. GPUI Kit and the GPUI packages
   used by this project declare Apache-2.0; bundled icon notices also apply.
 - `packaging/third-party/inputs/` contains unchanged upstream license texts,
-  version-binding evidence and the original NSIS source archive. These files
+  version-binding evidence. These files
   remain under their upstream licenses.
 - Nimbus branding and sample application code in `examples/` and
   `apps/avelin-cli/src/bin/` are Avelin's own test assets, covered by MIT.

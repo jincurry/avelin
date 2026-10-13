@@ -1,6 +1,7 @@
 mod coordinator;
 mod execution_files;
 mod failure_report;
+mod maintenance;
 mod resources;
 mod runtime_log;
 mod transport;

@@ -30,7 +30,7 @@ $expectedRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../target/m0
 if (-not $script:RunRoot.StartsWith($expectedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Fixture is outside the GUI fixture root.' }
 if ([IO.Path]::GetFullPath($FixturePath) -cne (Join-Path $script:RunRoot 'fixture.json')) { throw 'Fixture path and recorded run directory differ.' }
 if ($fixture.schema_version -ne 1 -or $fixture.status -cne 'BUILT_NOT_EXECUTED' -or $fixture.app_id -cnotmatch '^dev\.avelin\.m0\.gui\.[0-9a-f]{32}$') { throw 'Unrecognized fixture identity.' }
-$helperSource = Join-Path $script:RunRoot 'tools/run-m0.ps1'
+$helperSource = Join-Path $script:RunRoot 'tools/windows-fixture-common.ps1'
 # Reject reparse ancestors before loading even the pinned function definitions.
 $pathCursor = $helperSource
 while ($pathCursor) {
@@ -44,7 +44,7 @@ if ($helperInput.Count -ne 1 -or (Get-FileHash -LiteralPath $helperSource -Algor
 $tokens = $null; $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($helperSource, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'Pinned helper source does not parse.' }
-$helperNames = @('Assert-True', 'Get-FullPath', 'Assert-ContainedPath', 'Write-TaskJson', 'Read-StrictUtf8Json', 'Get-FileSnapshot', 'Assert-ResourceSnapshot', 'Get-TestRegistryState', 'Assert-NoTestSystemResources', 'Assert-Receipt', 'Add-TestUserFiles', 'Invoke-TaskProcess')
+$helperNames = @('Assert-True', 'Get-FullPath', 'Assert-ContainedPath', 'Write-TaskJson', 'Read-StrictUtf8Json', 'Get-FileSnapshot', 'Assert-ResourceSnapshot', 'Get-TestRegistryState', 'Assert-NoTestSystemResources', 'Assert-Receipt', 'Assert-CommittedReceiptCandidate', 'Add-TestUserFiles', 'Invoke-TaskProcess')
 foreach ($name in $helperNames) {
     $definitions = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $false))
     if ($definitions.Count -ne 1) { throw "Expected one shared function: $name" }
@@ -76,7 +76,7 @@ function Assert-NoProductLock {
     }
 }
 
-function Assert-ReportIdentity([object]$Report, [string]$Path, [string]$Result, [int]$ProcessExitCode) {
+function Assert-ReportIdentity([object]$Report, [string]$Path, [string]$Result, [int]$ProcessExitCode, [ValidateSet('install', 'uninstall')][string]$Operation = 'install', [object]$PreviousReceipt = $null) {
     Assert-True ($Report.result -cne 'Unknown') 'Unknown task outcome: retain the fixture; no cleanup or retry is allowed.'
     Assert-True ($Report.result -ceq $Result) "Expected $Result, observed $($Report.result)."
     $expectedCode = @{ Succeeded = 0; Cancelled = 2; Failed = 3 }[$Result]
@@ -88,7 +88,16 @@ function Assert-ReportIdentity([object]$Report, [string]$Path, [string]$Result, 
     $session = Assert-ContainedPath $Report.session_dir $script:RunRoot
     Assert-True ((Split-Path -Parent $session) -ceq (Split-Path -Parent $Path) -and (Split-Path -Leaf $session) -cmatch '^session-[0-9a-f]{32}$') 'Report session does not match the explicit-report layout.'
     $candidate = Read-StrictUtf8Json (Assert-ContainedPath (Join-Path $session 'receipt-candidate.json') $session)
-    Assert-True ($candidate.task_id -ceq $Report.task_id -and $candidate.app_id -ceq $script:TestAppId -and $candidate.app_version -ceq $script:TestVersion -and (Get-FullPath $candidate.install_dir) -ceq $installDirectory) 'Session candidate belongs to another task or fixture.'
+    $plan = Read-StrictUtf8Json (Assert-ContainedPath (Join-Path $session 'install-plan.json') $session)
+    $identity = Read-StrictUtf8Json (Assert-ContainedPath (Join-Path $session 'session.json') $session)
+    Assert-True ($Report.operation -ceq $Operation -and $plan.task_id -ceq $Report.task_id -and $identity.task_id -ceq $Report.task_id -and $plan.operation -ceq $Operation -and $identity.operation -ceq $Operation) 'Plan/session task or operation differs from the report.'
+    Assert-True ($candidate.app_id -ceq $script:TestAppId -and $candidate.app_version -ceq $script:TestVersion -and (Get-FullPath $candidate.install_dir) -ceq $installDirectory) 'Session candidate belongs to another fixture.'
+    Assert-True ($plan.app_id -ceq $candidate.app_id -and $plan.app_version -ceq $candidate.app_version -and (Get-FullPath $plan.install_dir) -ceq $installDirectory -and $plan.user_sid -ceq $candidate.user_sid -and $plan.manifest_sha256 -ceq $candidate.manifest_sha256 -and $identity.manifest_sha256 -ceq $candidate.manifest_sha256) 'Plan/session product evidence differs from the candidate.'
+    if ($Operation -ceq 'install') {
+        Assert-True ($candidate.task_id -ceq $Report.task_id) 'Install candidate belongs to another task.'
+    } else {
+        Assert-True ($null -ne $PreviousReceipt -and $candidate.task_id -cne $Report.task_id -and ($candidate | ConvertTo-Json -Depth 30 -Compress) -ceq ($PreviousReceipt | ConvertTo-Json -Depth 30 -Compress)) 'Uninstall candidate differs from the independently verified installed receipt.'
+    }
     Assert-True ($candidate.user_sid -ceq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) 'Session candidate belongs to a different Windows user.'
     Assert-True (($candidate.files | ConvertTo-Json -Depth 8 -Compress) -ceq ($snapshot | ConvertTo-Json -Depth 8 -Compress)) 'Session candidate resources differ from the independent fixture.'
     Assert-True (@($Report.events).Count -gt 0) 'Report contains no backend events.'
@@ -127,7 +136,7 @@ try {
     if ($Expected -eq 'Succeeded') {
         Assert-ResourceSnapshot $installDirectory $snapshot
         $receipt = Assert-Receipt $installDirectory $snapshot
-        Assert-True (($receipt | ConvertTo-Json -Depth 30 -Compress) -ceq ($candidate | ConvertTo-Json -Depth 30 -Compress)) 'Committed receipt differs from this task candidate.'
+        Assert-CommittedReceiptCandidate $receipt $candidate ((Get-FileHash -LiteralPath $fixture.paths.backend -Algorithm SHA256).Hash.ToLowerInvariant())
         $resident = Assert-ContainedPath (Join-Path $installDirectory '.avelin/avelin-app.exe') $installDirectory
         $residentManifest = Assert-ContainedPath (Join-Path $installDirectory '.avelin/manifest.json') $installDirectory
         $uninstaller = Assert-ContainedPath (Join-Path $installDirectory 'uninstall.exe') $installDirectory
@@ -139,9 +148,10 @@ try {
         Assert-True ($actualFiles.Count -eq $expectedFiles.Count -and @($actualFiles | Where-Object path -NotIn $expectedFiles).Count -eq 0) 'Unexpected installed resources.'
         $registry = @(Get-TestRegistryState | Where-Object exists)
         Assert-True ($registry.Count -ge 1) 'Successful install has no HKCU uninstall registration.'
-        $command = '"{0}" --operation uninstall --backend "{1}" --manifest "{2}" --install-dir "{3}"' -f $resident, $uninstaller, $residentManifest, $installDirectory
+        $command = '"{0}" --gui --operation uninstall --backend "{1}" --manifest "{2}" --install-dir "{3}"' -f $resident, $uninstaller, $residentManifest, $installDirectory
+        $quietCommand = '"{0}" --silent --operation uninstall --backend "{1}" --manifest "{2}" --install-dir "{3}"' -f $resident, $uninstaller, $residentManifest, $installDirectory
         foreach ($state in $registry) {
-            Assert-True ($state.values['DisplayVersion'] -ceq $script:TestVersion -and (Get-FullPath $state.values['InstallLocation']) -ceq $installDirectory -and $state.values['UninstallString'] -ceq $command -and $state.values['QuietUninstallString'] -ceq $command) 'HKCU uninstall registration differs.'
+            Assert-True ($state.values['DisplayVersion'] -ceq $script:TestVersion -and (Get-FullPath $state.values['InstallLocation']) -ceq $installDirectory -and $state.values['UninstallString'] -ceq $command -and $state.values['QuietUninstallString'] -ceq $quietCommand) 'HKCU uninstall registration differs.'
         }
         foreach ($shortcut in $script:TestShortcutPaths) { Assert-True (-not (Test-Path -LiteralPath $shortcut)) 'Disabled shortcut was created.' }
         $evidence['receipt'] = $receipt
@@ -165,9 +175,9 @@ try {
         Write-TaskJson (Join-Path $script:RunRoot 'uninstall-sentinels.json') $sentinels
         $uninstallReportPath = Join-Path $script:RunRoot 'cli-uninstall.report.json'
         Assert-True (-not (Test-Path -LiteralPath $uninstallReportPath)) 'Uninstall report already exists.'
-        $uninstallProcess = Invoke-TaskProcess $fixture.paths.runtime @('--backend', (Join-Path $installDirectory 'uninstall.exe'), '--manifest', $fixture.paths.manifest, '--install-dir', $installDirectory, '--operation', 'uninstall', '--report', $uninstallReportPath) 'cli-uninstall'
+        $uninstallProcess = Invoke-TaskProcess $fixture.paths.runtime @('--silent', '--backend', (Join-Path $installDirectory 'uninstall.exe'), '--manifest', $fixture.paths.manifest, '--install-dir', $installDirectory, '--operation', 'uninstall', '--report', $uninstallReportPath) 'cli-uninstall'
         $uninstallReport = Read-StrictUtf8Json $uninstallReportPath
-        $null = Assert-ReportIdentity $uninstallReport $uninstallReportPath 'Succeeded' $uninstallProcess.exit_code
+        $null = Assert-ReportIdentity $uninstallReport $uninstallReportPath 'Succeeded' $uninstallProcess.exit_code 'uninstall' $receipt
         Assert-True ($uninstallReport.task_id -cne $report.task_id) 'Uninstall reused the install task ID.'
         Assert-ResourceSnapshot $installDirectory $sentinels -Exact
         Assert-NoTestSystemResources

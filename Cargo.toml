@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/avelin-cli", "apps/avelin-app", "crates/avelin-core", "crates/avelin-ui", "crates/avelin-nsis-bridge", "crates/avelin-engine"]
+members = ["apps/avelin-cli", "apps/avelin-app", "crates/avelin-core", "crates/avelin-ui", "crates/avelin-engine"]
 default-members = ["apps/avelin-cli", "apps/avelin-app", "crates/avelin-core", "crates/avelin-engine"]
 
 [workspace.package]

@@ -53,33 +53,17 @@ start_menu_shortcut = true
 
 ## 生成安装包
 
-后端在构包命令选择，不需要修改 `avelin.toml`。使用同次源码构建的 CLI、runtime 和所选后端组件；此前只包含 NSIS 的工具包不会自动获得 Rust worker。
-
-### Rust 原生引擎
-
-准备 `avelin-cli.exe`、`avelin-app.exe` 和 `avelin-engine.exe`，源码命令见[开发指南](development.md)。明确选择 Rust 后端：
-
-```powershell
-& '<CLI>' build --engine rust --config ./MyInstaller/avelin.toml `
-  --runtime '<avelin-app.exe>' --rust-worker '<avelin-engine.exe>' `
-  --output ./MyInstaller/output/MyApp-1.0.0-Rust-Setup.exe
-```
-
-CLI 同目录已有这两个组件时，可以省略 `--runtime` 和 `--rust-worker`。此路径构建和安装均不依赖 NSIS 或 bridge；不能同时传入 `--bridge` / `--nsis`。
-
-当前原生载荷不压缩。包读取仍限制每层嵌入区域不超过 1 GiB，其中包括安装执行组件、runtime、应用文件和清单开销；这不是允许应用文件单独占满 1 GiB 的承诺。超限会拒绝构包。
-
-### NSIS 后端（默认）
-
-原有构包方式保留；省略 `--engine` 等同于 `--engine nsis`：
+使用同次构建的 `avelin-cli.exe`、`avelin-app.exe` 和 `avelin-engine.exe`：
 
 ```powershell
 & '<CLI>' build --config ./MyInstaller/avelin.toml `
-  --runtime '<avelin-app.exe>' --bridge '<avelin_nsis_bridge.dll>' `
-  --nsis '<NSIS目录/makensis.exe>' --output ./MyInstaller/output/MyApp-1.0.0-Setup.exe
+  --runtime '<avelin-app.exe>' --rust-worker '<avelin-engine.exe>' `
+  --output ./MyInstaller/output/MyApp-1.0.0-Setup.exe
 ```
 
-NSIS 便携工具包可自动定位同目录 runtime/bridge 与 tools/nsis。环境变量 NSIS_MAKENSIS 优先于包内 NSIS，构建 JSON 记录实际选用路径；Rust 构包不使用该变量。
+CLI 同目录已有 runtime 和 worker 时，可以省略 `--runtime` 和 `--rust-worker`。
+
+当前原生载荷不压缩。包读取仍限制每层嵌入区域不超过 1 GiB，其中包括安装执行组件、runtime、应用文件和清单开销；这不是允许应用文件单独占满 1 GiB 的承诺。超限会拒绝构包。
 
 每次使用新的输出路径。最终向应用用户分发 Setup；backend、manifest 等构建副产物留作核验。第三方声明及发行材料按[维护与发布](releasing.md)处理。
 
@@ -94,7 +78,7 @@ NSIS 便携工具包可自动定位同目录 runtime/bridge 与 tools/nsis。环
 
 升级保持产品 ID、当前用户和安装目录，使用更高的 SemVer 版本。安装后核对入口、快捷方式并按产品业务验证功能。卸载使用 Windows 已登记入口，并核对数据保留。应用目录外的数据兼容性由应用负责。
 
-这组运行参数同时适用于两个后端；不在用户安装时重新选择引擎。Rust 升级可接管满足当前记录与完整性约定的 NSIS 安装，并交接驻留卸载入口；应先用自己的 A/B 测试包验证迁移。缺少必要完整性字段的早期实验安装不在自动接管范围。
+当前仅支持 Rust 安装之间的升级。旧版非 Rust 安装需使用原卸载入口卸载，再安装新包；请先处理原应用的数据保留要求。
 
 若结果为 `Unknown` 或提示未完成任务，保留会话、日志、备份及事务标记，使用报告中的会话路径进行只读诊断：
 
@@ -102,6 +86,23 @@ NSIS 便携工具包可自动定位同目录 runtime/bridge 与 tools/nsis。环
 & '<CLI>' diagnose --session '<报告中的 session_dir>'
 ```
 
-当前没有自动跨进程恢复命令。不要删除标记后直接重新安装；诊断命令也不会代你执行回滚或重试。
+Rust 任务使用原始 Setup 检查，再明确执行恢复：
+
+```powershell
+& '<CLI>' recover --session '<报告中的 session_dir>' --setup '<原始Setup.exe>' --check
+& '<CLI>' recover --session '<报告中的 session_dir>' --setup '<原始Setup.exe>' --apply
+```
+
+恢复会验证任务、安装归属和实际资源。未提交的变更可在证据完整时回退，已提交操作经核验后确认；记录不足或出现外部冲突时保留现场并拒绝。不要删除标记后直接重新安装。缺少新恢复证据的历史任务不自动获得跨进程恢复能力。
+
+## 修复已经安装的应用
+
+保留与已安装版本对应的原始 Rust Setup。修复要求 manifest 和 backend 内容摘要与原安装一致；不同内容重建的同版本包会被拒绝。
+
+```powershell
+& '<原始Setup.exe>' --silent --operation repair --install-dir '<原安装目录>' --report '<新的报告路径>'
+```
+
+默认补回缺失资源，保留已修改的文件并在结果中列出。需要恢复修改过的受管文件时，可明确添加 `--repair-overwrite`，程序先备份再替换。用户数据和未知文件保持原样。修复前如果存在未完成事务，须先恢复。界面与静默入口共用资源保护规则，细节见[恢复与修复](maintenance.md)。
 
 操作限制、取消和结果解释见[兼容约定](compatibility.md)。Nimbus 是测试样例，不能代替真实应用验收。

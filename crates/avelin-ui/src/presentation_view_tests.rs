@@ -143,7 +143,7 @@ fn configured_view_preserves_shared_command_and_terminal_semantics(cx: &mut Test
             phase: UiPhase::Installing,
             completed: 42,
             total: Some(100),
-            detail: "NSIS: 文件名 {raw} error=5".into(),
+            detail: "Rust: 文件名 {raw} error=5".into(),
         })
         .unwrap();
     fixture.update(cx, |view, _, cx| {
@@ -152,7 +152,7 @@ fn configured_view_preserves_shared_command_and_terminal_semantics(cx: &mut Test
         view.cancel(cx);
         assert_eq!(view.phase(), UiPhase::Cancelling);
         view.options.locale = Locale::English;
-        assert_eq!(view.detail(), "NSIS: 文件名 {raw} error=5");
+        assert_eq!(view.detail(), "Rust: 文件名 {raw} error=5");
     });
     assert_eq!(command_rx.try_recv().unwrap(), UiCommand::Cancel);
     assert_eq!(command_rx.try_recv(), Err(TryRecvError::Empty));

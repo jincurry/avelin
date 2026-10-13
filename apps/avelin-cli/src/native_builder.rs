@@ -1,4 +1,4 @@
-//! Assemble the native backend without a compiler, script or NSIS bridge.
+//! Assemble the Rust worker, payload and runtime into a self-contained installer.
 use anyhow::{Context, Result, ensure};
 use avelin_core::{Manifest, hash_file, native_payload::NativePayload, reject_reparse};
 use std::{
@@ -12,8 +12,8 @@ pub fn build(
     runtime: Option<PathBuf>,
     worker: Option<PathBuf>,
 ) -> Result<()> {
-    let (source, manifest) = crate::builder::load(config)?;
-    let components = crate::components::resolve_native(runtime, worker)?;
+    let (source, manifest) = crate::config::load(config)?;
+    let components = crate::components::resolve(runtime, worker)?;
     let report = build_resolved(&source, manifest, output, &components)?;
     println!("{}", serde_json::to_string(&report)?);
     Ok(())
@@ -31,7 +31,7 @@ fn build_resolved(
     source: &Path,
     mut manifest: Manifest,
     output: &Path,
-    components: &crate::components::NativeResolved,
+    components: &crate::components::Resolved,
 ) -> Result<serde_json::Value> {
     manifest.runtime_sha256 = Some(hash_file(&components.runtime)?);
     manifest.validate()?;
@@ -63,15 +63,15 @@ fn build_resolved(
     fs::create_dir(&stage)?;
     let staged_runtime = stage.join("runtime.exe");
     let staged_worker = stage.join("avelin-engine.exe");
-    crate::builder::copy_new_file(&components.runtime, &staged_runtime)?;
-    crate::builder::copy_new_file(&components.worker, &staged_worker)?;
+    crate::build_output::copy_new_file(&components.runtime, &staged_runtime)?;
+    crate::build_output::copy_new_file(&components.worker, &staged_worker)?;
     let runtime_hash = manifest.runtime_sha256.as_deref().unwrap();
     verify_hash(&staged_runtime, runtime_hash, "runtime")?;
     verify_hash(&staged_worker, &worker_hash, "Rust worker")?;
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     let manifest_hash = avelin_core::hash_bytes(&manifest_bytes);
     let staged_metadata = stage.join("manifest.json");
-    crate::builder::write_new_file(&staged_metadata, &manifest_bytes)?;
+    crate::build_output::write_new_file(&staged_metadata, &manifest_bytes)?;
     let payload = stage.join("payload.bin");
     avelin_core::native_payload::write_payload(source, &staged_runtime, &manifest, &payload)?;
     let payload_hash = hash_file(&payload)?;
@@ -107,9 +107,9 @@ fn build_resolved(
     let setup_hash = hash_file(&staged_setup)?;
     // Publish only validated build products, using exclusive creates even when
     // another process creates an output after the diagnostic checks above.
-    crate::builder::copy_new_file(&staged_backend, &backend)?;
-    crate::builder::write_new_file(&metadata, &manifest_bytes)?;
-    crate::builder::copy_new_file(&staged_setup, &output)?;
+    crate::build_output::copy_new_file(&staged_backend, &backend)?;
+    crate::build_output::write_new_file(&metadata, &manifest_bytes)?;
+    crate::build_output::copy_new_file(&staged_setup, &output)?;
     verify_hash(&backend, &backend_hash, "published backend")?;
     verify_hash(&metadata, &manifest_hash, "published manifest")?;
     verify_hash(&output, &setup_hash, "published setup")?;
@@ -139,8 +139,8 @@ mod tests {
             fs::write(root.join("worker.exe"), b"worker fixture bytes").unwrap();
             Self(root)
         }
-        fn components(&self) -> crate::components::NativeResolved {
-            crate::components::NativeResolved {
+        fn components(&self) -> crate::components::Resolved {
+            crate::components::Resolved {
                 runtime: self.0.join("runtime.exe"),
                 worker: self.0.join("worker.exe"),
             }
@@ -181,11 +181,10 @@ mod tests {
     }
 
     #[test]
-    fn builds_two_verified_layers_and_matching_manifest_without_nsis() {
+    fn builds_two_verified_layers_and_matching_manifest() {
         let fixture = Fixture::new();
         let report = fixture.build().unwrap();
         assert_eq!(report["engine"], "rust");
-        assert!(report.get("nsis_path").is_none());
         let (backend, setup_manifest) = avelin_core::embedded(&fixture.0.join("Setup.exe"))
             .unwrap()
             .unwrap();

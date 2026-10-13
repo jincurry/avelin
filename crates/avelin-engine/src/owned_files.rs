@@ -260,6 +260,47 @@ pub fn remove_empty_directory(path: &str) -> Result<()> {
     mark_deleted(&file)
 }
 
+fn directory_fingerprint(info: &Information) -> String {
+    let bytes: Vec<u8> = [
+        info.volume,
+        info.index_high,
+        info.index_low,
+        info.creation.high,
+        info.creation.low,
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect();
+    hex::encode(Sha256::digest(bytes))
+}
+pub(crate) fn directory_identity(path: &str) -> Result<String> {
+    let path = checked_path(path)?;
+    let _parents = pin_parents(&path)?;
+    let file = open(&path, 1 | 0x80, 3, 0x0200_0000)?;
+    let info = information(&file)?;
+    ensure!(
+        info.attributes & DIRECTORY != 0 && info.attributes & REPARSE == 0,
+        "expected a plain directory for identity"
+    );
+    Ok(directory_fingerprint(&info))
+}
+/// Compare volume, file ID and creation time on the very handle being deleted.
+/// An external replacement, or a nonempty directory, is retained.
+pub(crate) fn remove_empty_directory_owned(path: &str, identity: &str) -> Result<()> {
+    validate_hash(identity)?;
+    let path = checked_path(path)?;
+    let _parents = pin_parents(&path)?;
+    let file = open(&path, 1 | 0x80 | DELETE, 3, 0x0200_0000)?;
+    let info = information(&file)?;
+    ensure!(
+        info.attributes & DIRECTORY != 0
+            && info.attributes & REPARSE == 0
+            && directory_fingerprint(&info) == identity,
+        "directory identity changed; preserve it"
+    );
+    mark_deleted(&file)
+}
+
 /// Copies an immutable source to a CREATE_NEW destination. Optional expected
 /// hash is checked before creating anything. The returned digest describes
 /// bytes created by this call, not a later pathname lookup.
@@ -372,69 +413,32 @@ pub fn write_new_bytes(path: &str, bytes: &[u8]) -> Result<String> {
     }
 }
 
-/// Metadata-only preparation under NSIS control. No installed files are changed.
-/// The coordinator supplies the complete new identity and selected destinations;
-/// hashes come from NSIS's immutable staged resources before the commit starts.
-#[cfg(test)]
-fn prepare_upgrade_receipt(
-    candidate: &str,
-    uninstaller: &str,
-    desktop: &str,
-    start_menu: &str,
-    output: &str,
-) -> Result<String> {
-    let mut receipt: serde_json::Value =
-        serde_json::from_slice(&read_bytes(candidate, 32 * 1024 * 1024)?)?;
+/// Append one already bounded record, flushing before the associated mutation.
+/// Readers reject an incomplete final record after abrupt termination.
+pub(crate) fn append_durable_bytes(path: &str, bytes: &[u8]) -> Result<()> {
     ensure!(
-        receipt["schema_version"] == 1 && receipt["uninstaller_sha256"].is_null(),
-        "invalid upgrade receipt candidate"
+        bytes.len() <= 128 * 1024 && bytes.ends_with(b"\n"),
+        "invalid durable record"
     );
+    let path = checked_path(path)?;
+    let _parents = pin_parents(&path)?;
+    let mut file = open(
+        &path,
+        READ | WRITE,
+        if path.try_exists()? { 3 } else { 1 },
+        0,
+    )?;
+    regular(&file)?;
     ensure!(
-        receipt["previous_commit_id"]
-            .as_str()
-            .is_some_and(|v| !v.is_empty()),
-        "upgrade receipt must bind the previous commit"
+        file.metadata()?.len() < 32 * 1024 * 1024,
+        "durable evidence size limit reached"
     );
-    receipt["uninstaller_sha256"] = hash_file(uninstaller)?.into();
-    if let Some(value) = receipt.get_mut("shortcuts") {
-        let shortcuts = value
-            .as_array_mut()
-            .context("invalid candidate shortcut list")?;
-        ensure!(shortcuts.len() <= 2, "too many selected shortcuts");
-        let mut seen = std::collections::BTreeSet::new();
-        for shortcut in shortcuts.iter_mut() {
-            let kind = shortcut["kind"]
-                .as_str()
-                .context("shortcut kind")?
-                .to_owned();
-            ensure!(
-                seen.insert(kind.clone()) && shortcut["sha256"] == "",
-                "duplicate or already committed shortcut"
-            );
-            let staged = match kind.as_str() {
-                "desktop" => desktop,
-                "start_menu" => start_menu,
-                _ => anyhow::bail!("unknown shortcut kind"),
-            };
-            ensure!(!staged.is_empty(), "selected shortcut has no staged file");
-            shortcut["sha256"] = hash_file(staged)?.into();
-        }
-        ensure!(
-            seen.contains("desktop") == !desktop.is_empty()
-                && seen.contains("start_menu") == !start_menu.is_empty(),
-            "staged shortcut selection mismatch"
-        );
-    } else {
-        ensure!(
-            desktop.is_empty() && start_menu.is_empty(),
-            "receipt omits selected shortcuts"
-        );
-    }
-    write_new_bytes(output, &serde_json::to_vec_pretty(&receipt)?)
+    file.seek(SeekFrom::End(0))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
 }
 
-/// A small write-ahead journal primitive. NSIS chooses every operation and its
-/// compensation; this helper does not interpret or execute an upgrade plan.
 pub fn append_upgrade_journal(
     path: &str,
     task: &str,
@@ -515,6 +519,19 @@ mod tests {
         }
     }
     #[test]
+    fn recovery_directory_cleanup_refuses_a_different_opened_directory() {
+        let fixture = Fixture::new();
+        let original = fixture.0.join("original");
+        let replacement = fixture.0.join("replacement");
+        create_directory(original.to_str().unwrap()).unwrap();
+        create_directory(replacement.to_str().unwrap()).unwrap();
+        let identity = directory_identity(original.to_str().unwrap()).unwrap();
+        assert!(remove_empty_directory_owned(replacement.to_str().unwrap(), &identity).is_err());
+        assert!(replacement.is_dir());
+        remove_empty_directory_owned(original.to_str().unwrap(), &identity).unwrap();
+        remove_empty_directory(replacement.to_str().unwrap()).unwrap();
+    }
+    #[test]
     fn publication_refuses_existing_destination_and_wrong_source_hash() {
         let f = Fixture::new();
         fs::write(f.name("source"), b"new").unwrap();
@@ -577,72 +594,6 @@ mod tests {
         assert!(create_directory(&path).is_err());
         assert!(Path::new(&path).is_dir());
         fs::remove_dir(path).unwrap();
-    }
-
-    #[test]
-    fn upgrade_receipt_uses_staged_hashes_and_refuses_replacing_metadata() {
-        let f = Fixture::new();
-        fs::write(f.name("source"), b"new uninstaller").unwrap();
-        fs::write(f.name("target"), b"new desktop link").unwrap();
-        let candidate = serde_json::json!({"schema_version":1,"previous_commit_id":"old-commit","commit_id":"new-commit",
-            "shortcuts":[{"kind":"desktop","path":"C:\\Users\\Test\\Desktop\\app.lnk","target":"C:\\Apps\\app.exe","sha256":""}]});
-        fs::write(
-            f.name("candidate.json"),
-            serde_json::to_vec(&candidate).unwrap(),
-        )
-        .unwrap();
-        let digest = prepare_upgrade_receipt(
-            &f.name("candidate.json"),
-            &f.name("source"),
-            &f.name("target"),
-            "",
-            &f.name("receipt.json"),
-        )
-        .unwrap();
-        let receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(f.name("receipt.json")).unwrap()).unwrap();
-        assert_eq!(digest, hash_file(&f.name("receipt.json")).unwrap());
-        assert_eq!(
-            receipt["uninstaller_sha256"],
-            hash_file(&f.name("source")).unwrap()
-        );
-        assert_eq!(
-            receipt["shortcuts"][0]["sha256"],
-            hash_file(&f.name("target")).unwrap()
-        );
-        assert_eq!(receipt["commit_id"], "new-commit");
-        assert!(
-            prepare_upgrade_receipt(
-                &f.name("candidate.json"),
-                &f.name("source"),
-                &f.name("target"),
-                "",
-                &f.name("receipt.json")
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn upgrade_receipt_without_shortcuts_does_not_introduce_null_list() {
-        let f = Fixture::new();
-        fs::write(f.name("source"), b"new uninstaller").unwrap();
-        fs::write(
-            f.name("candidate.json"),
-            br#"{"schema_version":1,"previous_commit_id":"old"}"#,
-        )
-        .unwrap();
-        prepare_upgrade_receipt(
-            &f.name("candidate.json"),
-            &f.name("source"),
-            "",
-            "",
-            &f.name("receipt.json"),
-        )
-        .unwrap();
-        let receipt: serde_json::Value =
-            serde_json::from_slice(&fs::read(f.name("receipt.json")).unwrap()).unwrap();
-        assert!(receipt.get("shortcuts").is_none());
     }
 
     #[test]

@@ -434,3 +434,128 @@ fn invalid_upgrade_versions_fail_before_native_initialization() {
         assert!(result.is_err());
     }
 }
+
+#[gpui_kit::test]
+fn maintenance_requires_consent_keeps_the_path_and_hides_install_choices(cx: &mut TestAppContext) {
+    for operation in [Operation::Repair, Operation::Recover] {
+        let (fixture, commands, snapshots, _responses) = connected(
+            cx,
+            UiOptions {
+                operation,
+                install_dir: PathBuf::from("C:\\Existing Product"),
+                maintenance_details: vec![("缺失：app.exe".into(), "Missing: app.exe".into())],
+                ..UiOptions::default()
+            },
+        );
+        fixture.update(cx, |view, window, cx| {
+            view.directory
+                .update(cx, |input, cx| input.set_value("C:\\Wrong", window, cx));
+            view.browse(window, cx);
+            view.start(cx);
+            assert_eq!(view.phase(), UiPhase::Ready);
+            assert!(!view.picker.pending());
+            assert!(view.fixed_directory());
+            if operation == Operation::Repair {
+                assert!(view.repair_policy().contains("保留"));
+            }
+        });
+        assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
+        assert!(!cx.did_prompt_for_paths());
+        cx.update_window(fixture.window.into(), |_, window, cx| {
+            for id in ["browse", "desktop", "start-menu", "launch"] {
+                assert!(window.try_find(id).is_none(), "maintenance hides {id}");
+            }
+            assert_eq!(
+                window.find("start").label(),
+                Some(if operation == Operation::Repair {
+                    "修复"
+                } else {
+                    "恢复"
+                })
+            );
+            window.click("consent", cx);
+            window.click("start", cx);
+        })
+        .unwrap();
+        assert_eq!(
+            commands.try_recv().unwrap(),
+            UiCommand::Start {
+                install_dir: PathBuf::from("C:\\Existing Product"),
+                desktop_shortcut: false,
+                start_menu_shortcut: false,
+            }
+        );
+        fixture.update(cx, |view, _, cx| {
+            view.cancel(cx);
+            assert!(!view.may_close(cx));
+        });
+        assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
+        snapshots
+            .send(UiSnapshot {
+                phase: UiPhase::Succeeded,
+                detail: "保留 1 项已修改资源；此项未修复。".into(),
+                ..UiSnapshot::default()
+            })
+            .unwrap();
+        fixture.update(cx, |view, _, cx| {
+            view.poll(cx);
+            assert!(view.may_close(cx));
+            assert_eq!(view.shows_launch(), operation == Operation::Repair);
+            assert_eq!(view.detail(), "保留 1 项已修改资源；此项未修复。");
+            assert_eq!(
+                view.title(),
+                if operation == Operation::Repair {
+                    "修复流程完成"
+                } else {
+                    "恢复完成"
+                }
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn repair_mode_and_recovery_titles_follow_language_switch(cx: &mut TestAppContext) {
+    for operation in [Operation::Repair, Operation::Recover] {
+        let (fixture, _commands, _snapshots, _responses) = connected(
+            cx,
+            UiOptions {
+                operation,
+                repair_overwrite: operation == Operation::Repair,
+                maintenance_details: vec![("已修改：app.exe".into(), "Changed: app.exe".into())],
+                ..UiOptions::default()
+            },
+        );
+        cx.update_window(fixture.window.into(), |_, window, cx| {
+            window.click("language", cx);
+        })
+        .unwrap();
+        fixture.update(cx, |view, _, _| {
+            assert_eq!(
+                view.title(),
+                if operation == Operation::Repair {
+                    "Inspect and repair"
+                } else {
+                    "Interrupted operation found"
+                }
+            );
+            assert!(super::window_title(&view.options).contains(
+                if operation == Operation::Repair {
+                    "Repair"
+                } else {
+                    "Recover"
+                }
+            ));
+            assert_eq!(
+                view.options.repair_overwrite,
+                operation == Operation::Repair
+            );
+            if operation == Operation::Repair {
+                assert!(
+                    view.repair_policy()
+                        .contains("backed up before replacement")
+                );
+            }
+        });
+    }
+}

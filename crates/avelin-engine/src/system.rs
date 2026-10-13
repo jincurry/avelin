@@ -68,6 +68,62 @@ impl Registration {
 }
 
 type Values = BTreeMap<String, (u32, Vec<u8>)>;
+/// Exact, bounded values of the product's one current-user uninstall key.
+/// None and an existing empty key are different states during recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RegistrationSnapshot {
+    pub values: Option<Values>,
+}
+
+/// false records durable intent, true records a flushed and verified mutation.
+/// The owner binds these records to the task before permitting recovery.
+pub(crate) type RegistrationObserver =
+    Box<dyn FnMut(&RegistrationSnapshot, &RegistrationSnapshot, bool) -> Result<()>>;
+
+pub(crate) fn registration_snapshot(id: &str) -> Result<RegistrationSnapshot> {
+    Ok(RegistrationSnapshot {
+        values: raw_snapshot(id)?,
+    })
+}
+
+pub(crate) fn registration_expected(registration: Option<&Registration>) -> RegistrationSnapshot {
+    RegistrationSnapshot {
+        values: registration.map(Registration::values),
+    }
+}
+
+fn validate_snapshot(snapshot: &RegistrationSnapshot) -> Result<()> {
+    if let Some(values) = &snapshot.values {
+        for (name, (kind, bytes)) in values {
+            ensure!(
+                NAMES.contains(&name.as_str()) && bytes.len() <= 65536,
+                "registration recovery contains an unsupported value"
+            );
+            if matches!(name.as_str(), "NoModify" | "NoRepair") {
+                ensure!(
+                    *kind == 4 && bytes.len() == 4,
+                    "invalid registration DWORD snapshot"
+                );
+            } else {
+                ensure!(
+                    *kind == 1 && bytes.len() >= 2 && bytes.len() % 2 == 0,
+                    "invalid registration text snapshot"
+                );
+                let units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                ensure!(
+                    units.last() == Some(&0) && !units[..units.len() - 1].contains(&0),
+                    "invalid registration text terminator"
+                );
+                String::from_utf16(&units[..units.len() - 1])?;
+            }
+        }
+    }
+    Ok(())
+}
 const NAMES: [&str; 7] = [
     "DisplayName",
     "DisplayVersion",
@@ -116,6 +172,7 @@ unsafe extern "system" {
         size: u32,
     ) -> i32;
     fn RegDeleteKeyExW(key: Handle, name: *const u16, access: u32, reserved: u32) -> i32;
+    fn RegDeleteValueW(key: Handle, name: *const u16) -> i32;
     fn RegQueryInfoKeyW(
         key: Handle,
         class: *mut u16,
@@ -258,6 +315,7 @@ pub struct RegistrationChange {
     created: bool,
     deleted: bool,
     modified: bool,
+    observer: Option<RegistrationObserver>,
 }
 
 fn create_new_key(id: &str) -> Result<Key> {
@@ -293,7 +351,52 @@ fn delete_key(key: &Key) -> Result<()> {
     Ok(())
 }
 
+fn flush_registration_parent() -> Result<()> {
+    let mut parent = ptr::null_mut();
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKCU,
+            wide(r"Software\Microsoft\Windows\CurrentVersion\Uninstall").as_ptr(),
+            0,
+            0x0001 | 0x0100,
+            &mut parent,
+        )
+    };
+    ensure!(
+        status == 0,
+        "open product registration parent for flush ({status})"
+    );
+    let parent = Key(parent);
+    ensure!(
+        unsafe { RegFlushKey(parent.0) } == 0,
+        "flush product registration deletion"
+    );
+    Ok(())
+}
+
 impl RegistrationChange {
+    fn observe(
+        &mut self,
+        before: &RegistrationSnapshot,
+        after: &RegistrationSnapshot,
+        complete: bool,
+    ) -> Result<()> {
+        if let Some(observer) = self.observer.as_mut() {
+            observer(before, after, complete)?;
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> RegistrationSnapshot {
+        RegistrationSnapshot {
+            values: if self.deleted {
+                None
+            } else {
+                Some(self.expected.clone())
+            },
+        }
+    }
+
     fn matches_current(&self) -> Result<()> {
         let key = self
             .key
@@ -307,11 +410,41 @@ impl RegistrationChange {
     }
 
     fn write_values(&mut self, values: &Values) -> Result<()> {
+        // Compensation can target a partial or empty pre-operation key.
+        let removed: Vec<String> = self
+            .expected
+            .keys()
+            .filter(|name| !values.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in removed {
+            self.matches_current()?;
+            let before = self.state();
+            let mut after = before.clone();
+            after.values.as_mut().unwrap().remove(&name);
+            self.observe(&before, &after, false)?;
+            self.matches_current()?;
+            let key = self.key.as_ref().context("registration handle missing")?;
+            let status = unsafe { RegDeleteValueW(key.0, wide(&name).as_ptr()) };
+            ensure!(status == 0, "delete product registration value ({status})");
+            self.modified = true;
+            self.expected.remove(&name);
+            self.flush_and_observe(&before, &after)?;
+        }
         for (name, (kind, bytes)) in values {
             self.matches_current()?;
             if self.expected.get(name) == Some(&(*kind, bytes.clone())) {
                 continue;
             }
+            let before = self.state();
+            let mut after = before.clone();
+            after
+                .values
+                .as_mut()
+                .unwrap()
+                .insert(name.clone(), (*kind, bytes.clone()));
+            self.observe(&before, &after, false)?;
+            self.matches_current()?;
             let key = self.key.as_ref().context("registration handle missing")?;
             let status = unsafe {
                 RegSetValueExW(
@@ -328,6 +461,7 @@ impl RegistrationChange {
             // never authorizes recovery to replace an external state.
             self.modified = true;
             self.expected.insert(name.clone(), (*kind, bytes.clone()));
+            self.flush_and_observe(&before, &after)?;
         }
         self.matches_current()?;
         ensure!(
@@ -337,7 +471,25 @@ impl RegistrationChange {
         Ok(())
     }
 
+    fn flush_and_observe(
+        &mut self,
+        before: &RegistrationSnapshot,
+        after: &RegistrationSnapshot,
+    ) -> Result<()> {
+        ensure!(
+            unsafe { RegFlushKey(self.key.as_ref().context("registration handle missing")?.0) }
+                == 0,
+            "flush product registration mutation"
+        );
+        self.matches_current()?;
+        self.observe(before, after, true)
+    }
+
     fn remove(&mut self) -> Result<()> {
+        self.matches_current()?;
+        let before = self.state();
+        let after = RegistrationSnapshot { values: None };
+        self.observe(&before, &after, false)?;
         self.matches_current()?;
         delete_key(self.key.as_ref().context("registration handle missing")?)?;
         self.deleted = true;
@@ -345,7 +497,12 @@ impl RegistrationChange {
         // The deleted object has no values that recovery may update. Close it
         // before CREATE_NEW restoration; any replacement key must be preserved.
         self.key.take();
-        Ok(())
+        flush_registration_parent()?;
+        ensure!(
+            raw_snapshot(&self.id)?.is_none(),
+            "product registration was recreated; preserve it"
+        );
+        self.observe(&before, &after, true)
     }
 
     pub fn restore(&mut self) -> Result<()> {
@@ -357,11 +514,17 @@ impl RegistrationChange {
                 .before
                 .clone()
                 .context("deleted registration has no original snapshot")?;
+            let absent = RegistrationSnapshot { values: None };
+            let empty = RegistrationSnapshot {
+                values: Some(Values::new()),
+            };
+            self.observe(&absent, &empty, false)?;
             let key = create_new_key(&self.id)?;
             self.key = Some(key);
             self.expected = Values::new();
             self.created = true;
             self.deleted = false;
+            self.flush_and_observe(&absent, &empty)?;
             // A failure leaves a guarded, known partial restoration and is
             // reported Unknown. It never falls back to a pathname overwrite.
             self.write_values(&before)?;
@@ -377,11 +540,22 @@ impl RegistrationChange {
     }
 }
 
+#[cfg(test)]
 pub fn replace_registration(
     id: &str,
     before: Option<&Registration>,
     after: Option<&Registration>,
     change: &mut Option<RegistrationChange>,
+) -> Result<()> {
+    replace_registration_observed(id, before, after, change, None)
+}
+
+pub(crate) fn replace_registration_observed(
+    id: &str,
+    before: Option<&Registration>,
+    after: Option<&Registration>,
+    change: &mut Option<RegistrationChange>,
+    mut observer: Option<RegistrationObserver>,
 ) -> Result<()> {
     ensure!(
         change.is_none(),
@@ -414,6 +588,15 @@ pub fn replace_registration(
         );
         (key, false)
     } else {
+        if let Some(record) = observer.as_mut() {
+            record(
+                &RegistrationSnapshot { values: None },
+                &RegistrationSnapshot {
+                    values: Some(Values::new()),
+                },
+                false,
+            )?;
+        }
         (create_new_key(id)?, true)
     };
     // CREATE_NEW already changed the registry; retain its exact handle before
@@ -426,14 +609,101 @@ pub fn replace_registration(
         created,
         deleted: false,
         modified: false,
+        observer,
     });
     let guard = change.as_mut().unwrap();
+    if created {
+        guard.flush_and_observe(
+            &RegistrationSnapshot { values: None },
+            &RegistrationSnapshot {
+                values: Some(Values::new()),
+            },
+        )?;
+    }
     if let Some(values) = after_values {
         guard.write_values(&values)?;
     } else {
         guard.remove()?;
     }
     verify_registration(id, after)
+}
+
+/// The caller must authorize expected_current from durable, task-bound evidence.
+/// A fresh pinned key is compared before every mutation. A competing writer or
+/// recreated key is preserved. Every compensation has the same durable observer.
+pub(crate) fn restore_registration_snapshot(
+    id: &str,
+    expected_current: &RegistrationSnapshot,
+    target: &RegistrationSnapshot,
+    mut observer: Option<RegistrationObserver>,
+) -> Result<()> {
+    validate_snapshot(expected_current)?;
+    validate_snapshot(target)?;
+    ensure!(
+        registration_snapshot(id)? == *expected_current,
+        "product registration changed since recovery inspection"
+    );
+    if expected_current == target {
+        return Ok(());
+    }
+    let (key, created) = if let Some(expected) = &expected_current.values {
+        let mut handle = ptr::null_mut();
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKCU,
+                key_name(id)?.as_ptr(),
+                0,
+                REGISTRATION_ACCESS,
+                &mut handle,
+            )
+        };
+        ensure!(status == 0, "open recovery registration ({status})");
+        let key = Key(handle);
+        ensure!(
+            snapshot_key(&key)? == *expected,
+            "registration changed before recovery; preserve it"
+        );
+        (key, false)
+    } else {
+        if let Some(record) = observer.as_mut() {
+            record(
+                expected_current,
+                &RegistrationSnapshot {
+                    values: Some(Values::new()),
+                },
+                false,
+            )?;
+        }
+        (create_new_key(id)?, true)
+    };
+    let mut guard = RegistrationChange {
+        id: id.into(),
+        key: Some(key),
+        before: expected_current.values.clone(),
+        expected: expected_current.values.clone().unwrap_or_default(),
+        created,
+        deleted: false,
+        modified: false,
+        observer,
+    };
+    if created {
+        guard.flush_and_observe(
+            expected_current,
+            &RegistrationSnapshot {
+                values: Some(Values::new()),
+            },
+        )?;
+    }
+    if let Some(values) = &target.values {
+        guard.write_values(values)?;
+    } else {
+        guard.remove()?;
+    }
+    ensure!(
+        registration_snapshot(id)? == *target,
+        "recovered product registration did not verify"
+    );
+    Ok(())
 }
 
 /// Test-fixture cleanup with the same strict compare/update path. Production
@@ -592,6 +862,155 @@ mod tests {
     }
 
     #[test]
+    fn persisted_registry_steps_can_restore_a_partial_update_after_handles_are_dropped() {
+        use std::{cell::RefCell, rc::Rc};
+        let fixture = RegistryFixture::new();
+        let old = fixture.registration("1");
+        let mut next = fixture.registration("2");
+        next.display_name = "Updated fixture".into();
+        fixture.install(&old);
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let captured = events.clone();
+        let id = fixture.id.clone();
+        let observer: RegistrationObserver = Box::new(move |before, after, complete| {
+            assert_eq!(
+                registration_snapshot(&id)?,
+                if complete { after } else { before }.clone()
+            );
+            captured
+                .borrow_mut()
+                .push((before.clone(), after.clone(), complete));
+            ensure!(
+                !complete,
+                "simulate interruption immediately after one flushed write"
+            );
+            Ok(())
+        });
+        let mut change = None;
+        assert!(
+            replace_registration_observed(
+                &fixture.id,
+                Some(&old),
+                Some(&next),
+                &mut change,
+                Some(observer)
+            )
+            .is_err()
+        );
+        drop(change);
+        let partial = registration_snapshot(&fixture.id).unwrap();
+        assert_ne!(partial, registration_expected(Some(&old)));
+        assert_ne!(partial, registration_expected(Some(&next)));
+        assert_eq!(events.borrow().len(), 2);
+        assert_eq!(events.borrow()[0].1, partial);
+        restore_registration_snapshot(
+            &fixture.id,
+            &partial,
+            &registration_expected(Some(&old)),
+            None,
+        )
+        .unwrap();
+        verify_registration(&fixture.id, Some(&old)).unwrap();
+    }
+
+    #[test]
+    fn interrupted_registry_compensation_can_be_retried_from_its_recorded_partial_state() {
+        let fixture = RegistryFixture::new();
+        let old = fixture.registration("1");
+        let mut next = fixture.registration("2");
+        next.display_name = "Changed name".into();
+        fixture.install(&next);
+        let before = registration_expected(Some(&next));
+        let target = registration_expected(Some(&old));
+        let id = fixture.id.clone();
+        let observer: RegistrationObserver = Box::new(move |before, after, complete| {
+            assert_eq!(
+                registration_snapshot(&id)?,
+                if complete { after } else { before }.clone()
+            );
+            ensure!(!complete, "simulate interruption during compensation");
+            Ok(())
+        });
+        assert!(
+            restore_registration_snapshot(&fixture.id, &before, &target, Some(observer)).is_err()
+        );
+        let interrupted = registration_snapshot(&fixture.id).unwrap();
+        assert_ne!(interrupted, before);
+        assert_ne!(interrupted, target);
+        restore_registration_snapshot(&fixture.id, &interrupted, &target, None).unwrap();
+        restore_registration_snapshot(&fixture.id, &target, &target, None).unwrap();
+        verify_registration(&fixture.id, Some(&old)).unwrap();
+    }
+
+    #[test]
+    fn registry_recovery_preserves_external_changes_and_rejects_unregistered_values() {
+        let fixture = RegistryFixture::new();
+        let old = fixture.registration("1");
+        let external = fixture.registration("external");
+        fixture.install(&external);
+        assert!(
+            restore_registration_snapshot(
+                &fixture.id,
+                &registration_expected(Some(&old)),
+                &registration_expected(None),
+                None
+            )
+            .is_err()
+        );
+        verify_registration(&fixture.id, Some(&external)).unwrap();
+        let mut invalid = registration_expected(Some(&external));
+        invalid
+            .values
+            .as_mut()
+            .unwrap()
+            .insert("External".into(), (4, vec![0; 4]));
+        assert!(
+            restore_registration_snapshot(
+                &fixture.id,
+                &registration_expected(Some(&external)),
+                &invalid,
+                None
+            )
+            .is_err()
+        );
+        verify_registration(&fixture.id, Some(&external)).unwrap();
+    }
+
+    #[test]
+    fn interrupted_key_creation_retains_the_empty_state_for_cross_process_cleanup() {
+        let fixture = RegistryFixture::new();
+        let next = fixture.registration("1");
+        let mut change = None;
+        let observer: RegistrationObserver = Box::new(|before, after, complete| {
+            assert_eq!(before.values, None);
+            assert_eq!(after.values, Some(Values::new()));
+            ensure!(!complete, "simulate interruption after key creation");
+            Ok(())
+        });
+        assert!(
+            replace_registration_observed(
+                &fixture.id,
+                None,
+                Some(&next),
+                &mut change,
+                Some(observer)
+            )
+            .is_err()
+        );
+        drop(change);
+        let empty = RegistrationSnapshot {
+            values: Some(Values::new()),
+        };
+        assert_eq!(registration_snapshot(&fixture.id).unwrap(), empty);
+        restore_registration_snapshot(&fixture.id, &empty, &registration_expected(None), None)
+            .unwrap();
+        assert_eq!(
+            registration_snapshot(&fixture.id).unwrap(),
+            registration_expected(None)
+        );
+    }
+
+    #[test]
     fn missing_or_modified_registration_is_rejected_without_a_mutation_guard() {
         let fixture = RegistryFixture::new();
         let old = fixture.registration("1");
@@ -704,6 +1123,7 @@ mod tests {
             created: true,
             deleted: false,
             modified: false,
+            observer: None,
         };
         assert!(
             change

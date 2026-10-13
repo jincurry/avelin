@@ -28,8 +28,8 @@ def digest(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run", type=Path, help="Completed run-m3.ps1 evidence directory")
-    parser.add_argument("--m2-run", type=Path, help="Frozen, completed run-m2.ps1 evidence directory")
+    parser.add_argument("--run", type=Path, help="Historical completed M3 evidence directory")
+    parser.add_argument("--m2-run", type=Path, help="Frozen historical M2 evidence directory")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2] / "docs" / "schemas"
     base = "https://avelin.dev/schemas/m1/"
@@ -103,6 +103,11 @@ def main():
     check("m3/receipt-lineage", dict(receipt, previous_commit_id="previous-commit"), "model", "Receipt")
     check("m3/legacy-optional-lineage", dict(receipt, previous_commit_id=None), "model", "Receipt")
     check("m3/install-with-null-context", dict(plan, upgrade=None), "model", "InstallPlan")
+    for operation_name in ("repair", "recover"):
+        check(f"maintenance/{operation_name}-plan", dict(plan, operation=operation_name), "model", "InstallPlan")
+        check(f"maintenance/{operation_name}-null-upgrade", dict(plan, operation=operation_name, upgrade=None), "model", "InstallPlan")
+        reject(f"maintenance/{operation_name}-upgrade-context", dict(plan, operation=operation_name, upgrade=upgrade), "model", "InstallPlan")
+    reject("maintenance/unknown-operation", dict(plan, operation="restore"), "model", "InstallPlan")
     text = {"upgrade.versions": "Version {previous_version} -> {version}",
             "window.upgrade_title": "Upgrade {app_name}", "action.upgrade": "Update"}
     check("m3/upgrade-presentation", dict(presentation, strings={"en-US": text}), "presentation")

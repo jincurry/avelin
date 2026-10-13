@@ -1,5 +1,5 @@
 #requires -Version 7.2
-<# Real-process acceptance for the optional Rust backend. All payloads and evidence are
+<# Real-process acceptance for the Rust engine. All payloads and evidence are
    isolated below a new workspace target directory. Only the two exact, UUID-named
    current-user shortcuts and the matching uninstall key live outside that directory.
    Failed scenes are retained. This script never kills processes or recursively deletes. #>
@@ -10,8 +10,6 @@ param(
     [Parameter(Mandatory)][string]$RustWorker,
     [Parameter(Mandatory)][string]$OutputRoot,
     [string]$Sample = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'examples/nimbus/payload/nimbus-demo.exe'),
-    [string]$Nsis,
-    [string]$Bridge,
     [ValidateRange(10, 1800)][int]$TimeoutSeconds = 180
 )
 
@@ -106,19 +104,16 @@ function AssertUnchanged([object]$Before, [string]$Label) {
     Require (($Before | ConvertTo-Json -Depth 50 -Compress) -ceq ($after | ConvertTo-Json -Depth 50 -Compress)) "$Label changed product resources"
     Require (-not (Test-Path -LiteralPath $script:LockPath)) "$Label retained the product lock"
 }
-function InvokeProcess([string]$Executable, [string[]]$Arguments, [string]$Name, [string]$AwaitReport = '', [string]$RawArguments = '', [int]$ExpectedExit = 0, [switch]$AllowNsis) {
+function InvokeProcess([string]$Executable, [string[]]$Arguments, [string]$Name, [string]$AwaitReport = '', [string]$RawArguments = '', [int]$ExpectedExit = 0) {
     $info = [Diagnostics.ProcessStartInfo]::new($Executable)
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $info.WorkingDirectory = $script:RunRoot; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
     $info.StandardOutputEncoding = $script:Utf8; $info.StandardErrorEncoding = $script:Utf8
     $info.Environment['TEMP'] = $script:TempRoot; $info.Environment['TMP'] = $script:TempRoot; $info.Environment['LOCALAPPDATA'] = $script:LocalRoot
-    if (-not $AllowNsis) {
-        $null = $info.Environment.Remove('NSIS_MAKENSIS'); $null = $info.Environment.Remove('NSISDIR')
-        $info.Environment['PATH'] = [Environment]::GetFolderPath('System') + ';' + $env:SystemRoot
-    }
+    $info.Environment['PATH'] = [Environment]::GetFolderPath('System') + ';' + $env:SystemRoot
     if ($RawArguments) { Require (@($Arguments).Count -eq 0) 'Mixed argument forms'; $info.Arguments = $RawArguments }
     else { foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) } }
-    $record = [ordered]@{ executable = $Executable; executable_sha256 = Hash $Executable; arguments = $Arguments; raw_arguments = $RawArguments; started_at_utc = [DateTime]::UtcNow.ToString('o'); status = 'STARTING'; awaited_report = $AwaitReport; nsis_environment_available = [bool]$AllowNsis }
+    $record = [ordered]@{ executable = $Executable; executable_sha256 = Hash $Executable; arguments = $Arguments; raw_arguments = $RawArguments; started_at_utc = [DateTime]::UtcNow.ToString('o'); status = 'STARTING'; awaited_report = $AwaitReport }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $info
     try {
         $null = $process.Start(); $record.process_id = $process.Id; $record.process_start_utc = $process.StartTime.ToUniversalTime().ToString('o'); $record.status = 'RUNNING'
@@ -194,7 +189,7 @@ function NewProduct([string]$Label) {
     $null = [IO.Directory]::CreateDirectory($script:InstallRoot)
     Save "$Label.identity.json" @{ app_id = $script:AppId; install_dir = $script:InstallRoot; registry_subkey = $script:RegistrySubkey; desktop = $script:DesktopPath; start_menu = $script:StartMenuPath; user_sid = $script:UserSid; product_lock = $script:LockPath }
 }
-function BuildPackage([string]$Label, [string]$Version, [ValidateSet('a', 'b')][string]$Layout, [ValidateSet('rust', 'nsis')][string]$Engine = 'rust') {
+function BuildPackage([string]$Label, [string]$Version, [ValidateSet('a', 'b')][string]$Layout) {
     $project = Inside (Join-Path $script:RunRoot "project-$Label 中文") $script:RunRoot; $payload = Join-Path $project 'dist'
     $entry = if ($Layout -ceq 'a') { 'app.exe' } else { 'bin\app.exe' }
     CopyNew $script:SampleBinary (Join-Path $payload $entry)
@@ -227,12 +222,10 @@ accent_color = "#245DA8"
     $source = @(Snapshot $payload); Save "$Label.source.json" $source
     InvokeProcess $script:CliBinary @('check', '--config', $config) "check-$Label"
     $setup = Join-Path $script:RunRoot "$Label-Setup.exe"
-    $arguments = @('build', '--config', $config, '--output', $setup, '--runtime', $script:RuntimeBinary, '--engine', $Engine)
-    if ($Engine -ceq 'rust') { $arguments += @('--rust-worker', $script:WorkerBinary) }
-    else { $arguments += @('--bridge', $script:BridgeBinary, '--nsis', $Nsis) }
-    InvokeProcess $script:CliBinary $arguments "build-$Label" -AllowNsis:($Engine -ceq 'nsis')
+    $arguments = @('build', '--config', $config, '--output', $setup, '--runtime', $script:RuntimeBinary, '--rust-worker', $script:WorkerBinary)
+    InvokeProcess $script:CliBinary $arguments "build-$Label"
     $built = Json (Join-Path $script:RunRoot "build-$Label.stdout.log")
-    Require ($built.engine -ceq $Engine) 'Builder did not report the requested execution engine'
+    Require ($built.engine -ceq 'rust') 'Builder did not report the Rust execution engine'
     $stream = [IO.File]::OpenRead($setup)
     try {
         $null = $stream.Seek(-72, [IO.SeekOrigin]::End); $footer = ReadBytes $stream 72
@@ -253,8 +246,8 @@ accent_color = "#245DA8"
         $actual = @($manifest.files | Where-Object path -CEQ $file.path)
         Require ($actual.Count -eq 1 -and $actual[0].sha256 -ceq $file.sha256 -and $actual[0].size -eq $file.size) 'Packaged payload differs from independent input'
     }
-    if ($Engine -ceq 'rust') { VerifyNativeBundle ([IO.Path]::ChangeExtension($setup, 'backend.exe')) $manifest (HashBytes $metadata) }
-    [pscustomobject]@{ label = $Label; engine = $Engine; setup = $setup; setup_sha256 = Hash $setup; manifest = $manifest; manifest_sha256 = HashBytes $metadata; manifest_file_sha256 = Hash $manifestFile; source_files = $source; source_directory = $payload }
+    VerifyNativeBundle ([IO.Path]::ChangeExtension($setup, 'backend.exe')) $manifest (HashBytes $metadata)
+    [pscustomobject]@{ label = $Label; engine = 'rust'; setup = $setup; setup_sha256 = Hash $setup; manifest = $manifest; manifest_sha256 = HashBytes $metadata; manifest_file_sha256 = Hash $manifestFile; source_files = $source; source_directory = $payload }
 }
 function OperationReport([string]$Path, [string]$Operation, [string]$Label, [object]$Package, [string]$ExpectedResult = 'Succeeded', [int]$ExpectedCode = 0) {
     $report = Json $Path
@@ -546,12 +539,10 @@ function UnknownUpgradeFixture([ValidateSet('after-commit', 'rollback')][string]
 
 Require ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) 'This harness requires Windows'
 . (Join-Path $PSScriptRoot 'windows-shell-link.ps1')
-Require (([bool]$Nsis) -eq ([bool]$Bridge)) 'Specify both Nsis and Bridge to include the optional migration case'
 $projectRoot = Full (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $script:RunRoot = Inside $OutputRoot (Join-Path $projectRoot 'target')
 Require (-not (Test-Path -LiteralPath $script:RunRoot)) 'OutputRoot must be a fresh directory beneath this workspace target'
 foreach ($binary in @($Runtime, $Cli, $RustWorker, $Sample)) { Require (Test-Path -LiteralPath $binary -PathType Leaf) "Missing prerequisite: $binary" }
-if ($Nsis) { $Nsis = Full $Nsis; Require ((Test-Path -LiteralPath $Nsis -PathType Leaf) -and (Test-Path -LiteralPath $Bridge -PathType Leaf)) 'Missing migration NSIS/bridge prerequisite' }
 $null = [IO.Directory]::CreateDirectory($script:RunRoot)
 $script:TempRoot = Join-Path $script:RunRoot 'temp'; $script:LocalRoot = Join-Path $script:RunRoot 'local-app-data'
 $null = [IO.Directory]::CreateDirectory($script:TempRoot); $null = [IO.Directory]::CreateDirectory($script:LocalRoot)
@@ -562,8 +553,7 @@ $script:RuntimeBinary = Join-Path $script:RunRoot 'tools\avelin-app.exe'; CopyNe
 $script:CliBinary = Join-Path $script:RunRoot 'tools\avelin-cli.exe'; CopyNew $Cli $script:CliBinary
 $script:WorkerBinary = Join-Path $script:RunRoot 'tools\avelin-engine.exe'; CopyNew $RustWorker $script:WorkerBinary
 $script:SampleBinary = Join-Path $script:RunRoot 'tools\nimbus-demo.exe'; CopyNew $Sample $script:SampleBinary
-if ($Bridge) { $script:BridgeBinary = Join-Path $script:RunRoot 'tools\avelin_nsis_bridge.dll'; CopyNew $Bridge $script:BridgeBinary }
-$summary = [ordered]@{ schema_version = 1; status = 'RUNNING'; started_at_utc = [DateTime]::UtcNow.ToString('o'); run_directory = $script:RunRoot; scope = 'Actual Rust build/install/cancel/partial-write failure/upgrade/run/owned uninstall/reinstall with independent resources and optional NSIS migration'; gui_executed = $false; performance_measured = $false; signing_verified = $false; environment = 'Current Windows user; Rust child PATH only contains Windows/System32 and Windows'; migration_requested = [bool]$Nsis; completed_cases = @() }
+$summary = [ordered]@{ schema_version = 1; status = 'RUNNING'; started_at_utc = [DateTime]::UtcNow.ToString('o'); run_directory = $script:RunRoot; scope = 'Actual Rust build/install/cancel/partial-write failure/upgrade/run/owned uninstall/reinstall with independent resources'; gui_executed = $false; performance_measured = $false; signing_verified = $false; environment = 'Current Windows user; Rust child PATH only contains Windows/System32 and Windows'; completed_cases = @() }
 try {
     NewProduct 'native'
     $a = BuildPackage 'native-a' '1.0.0' 'a'; $b = BuildPackage 'native-b' '1.1.0' 'b'
@@ -642,30 +632,10 @@ try {
     Require (-not (Test-Path -LiteralPath $script:DesktopPath) -and -not (Test-Path -LiteralPath $script:StartMenuPath)) 'Final native fixture shortcut remains'
     Save 'native.final.json' (ProductSnapshot); $summary.completed_cases += 'reinstall-and-direct-uninstall'
 
-    if ($Nsis) {
-        NewProduct 'migration'
-        $legacy = BuildPackage 'migration-nsis-a' '1.0.0' 'a' 'nsis'; $native = BuildPackage 'migration-rust-b' '1.1.0' 'b' 'rust'
-        $migrationSentinels = @(AddSentinels); $legacyPath = Join-Path $script:RunRoot 'migration-install-a.report.json'
-        InvokeProcess $legacy.setup @('--silent', '--install-dir', $script:InstallRoot, '--report', $legacyPath) 'migration-install-a' $legacyPath
-        $legacyReport = OperationReport $legacyPath 'install' 'migration-install-a' $legacy
-        $legacyReceipt = VerifyInstalled $legacy $legacyReport 'migration-installed-a' @('desktop', 'start_menu')
-        $legacyUninstallerHash = Hash (Join-Path $script:InstallRoot 'uninstall.exe')
-        RecoverableUpgradeFault $native 'migration-before-commit' 'before-commit'
-        $summary.completed_cases += 'nsis-to-rust-before-commit-restores-nsis'
-        $migrationPath = Join-Path $script:RunRoot 'migration-upgrade-b.report.json'
-        InvokeProcess $native.setup @('--silent', '--operation', 'upgrade', '--install-dir', $script:InstallRoot, '--report', $migrationPath) 'migration-upgrade-b' $migrationPath
-        $migrationReport = OperationReport $migrationPath 'upgrade' 'migration-upgrade-b' $native
-        $nativeReceipt = VerifyInstalled $native $migrationReport 'migration-upgraded-b' @('desktop', 'start_menu')
-        Require ($nativeReceipt.installation_id -ceq $legacyReceipt.installation_id -and $nativeReceipt.previous_commit_id -ceq $legacyReceipt.commit_id -and $nativeReceipt.uninstaller_sha256 -cne $legacyUninstallerHash) 'Migration lineage or old uninstaller handoff failed'
-        AssertFiles $script:InstallRoot $migrationSentinels
-        UninstallRegistered $native 'migration-uninstall-b'; AssertFiles $script:InstallRoot $migrationSentinels -Exact
-        Require (-not (Test-Path -LiteralPath $script:DesktopPath) -and -not (Test-Path -LiteralPath $script:StartMenuPath)) 'Migration shortcut remains'
-        Save 'migration.final.json' (ProductSnapshot); $summary.completed_cases += 'nsis-to-rust-normal-migration'
-    }
     UnknownUpgradeFixture 'after-commit'; $summary.completed_cases += 'post-commit-confirmation-loss-preserves-committed-b'
     UnknownUpgradeFixture 'rollback'; $summary.completed_cases += 'incomplete-rollback-diagnosis-and-reentry-refusal'
     $summary.status = 'PASSED'
-    $summary.uncovered = @('GUI interaction', 'uninstall execution fault checkpoints', 'process interruption and recovery interruption', 'physical volume exhaustion', 'historical NSIS runtime version matrix', 'signing and independent environments')
+    $summary.uncovered = @('GUI interaction', 'uninstall execution fault checkpoints', 'process interruption and recovery interruption', 'physical volume exhaustion', 'signing and independent environments')
 } catch {
     $summary.status = 'FAILED'; $summary.failure = $_.Exception.Message
     # Keep source locations separately from private stack paths so CI can publish

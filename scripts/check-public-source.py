@@ -26,7 +26,6 @@ MAX_BYTES = 20 * 1024 * 1024
 PRODUCT_SUFFIXES = {".exe", ".dll", ".pdb", ".log", ".zip", ".pyc", ".pyo"}
 REVIEWED_BINARY_INPUTS = {
     "examples/nimbus/branding/nimbus.png",
-    "packaging/third-party/inputs/nsis-3.12-src.tar.bz2",
 }
 CREDENTIAL_PATTERNS = {
     "private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"),

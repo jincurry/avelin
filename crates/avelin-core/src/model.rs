@@ -15,6 +15,8 @@ pub enum Operation {
     Install,
     Uninstall,
     Upgrade,
+    Repair,
+    Recover,
 }
 
 impl Operation {
@@ -23,6 +25,8 @@ impl Operation {
             Self::Install => "install",
             Self::Uninstall => "uninstall",
             Self::Upgrade => "upgrade",
+            Self::Repair => "repair",
+            Self::Recover => "recover",
         }
     }
 }

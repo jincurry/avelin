@@ -15,7 +15,7 @@ be new. No existing output is overwritten and no files are removed.
 .PARAMETER Files
 One or more existing PE EXE/DLL files. Pass a PowerShell array when invoking
 the script from PowerShell, for example: & ./scripts/inspect-m0-imports.ps1
--Files @('target/release/avelin-app.exe', 'path/to/bridge.dll').
+-Files @('target/release/avelin-app.exe', 'target/release/avelin-engine.exe').
 .PARAMETER OutputDirectory
 New result directory. Defaults to target/m0-import-audit/<timestamp>-<suffix>.
 #>

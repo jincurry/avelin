@@ -188,7 +188,7 @@ if ($Mode -ne 'Connected') {
     $faultAfterFiles = $options.fault_after_files
     if ($fixture.ContainsKey('failure_injection')) {
         $injection = $fixture.failure_injection
-        $expectedKind = if ($faultAfterFiles) { 'NSIS_WRITE_STAGE_AFTER_FILES' } else { 'NONE' }
+        $expectedKind = if ($faultAfterFiles) { 'RUST_WRITE_STAGE_AFTER_FILES' } else { 'NONE' }
         $expectedResult = if ($faultAfterFiles) { 'Failed' } else { $null }
         Assert-Condition ($injection.kind -ceq $expectedKind -and $injection.after_files -eq $faultAfterFiles -and $injection.expected_task_result -ceq $expectedResult -and $injection.automatic_cancellation -ceq $false) 'Fixture injection metadata differs from its recorded arguments.'
     }
@@ -210,7 +210,7 @@ $plan = [ordered]@{
     runtime_snapshot = if ($Mode -eq 'Connected') { $sourceRuntime } else { Join-Path $toolsDirectory 'avelin-app.exe' }; arguments = @($arguments)
     fixture = $fixtureRecord; delay_ms = $DelayMs
     fault_after_files = $faultAfterFiles
-    failure_injection = if ($faultAfterFiles) { 'NSIS write-stage injection; installation must still be started in the GUI. This is not a real graphics fault.' } else { 'None' }
+    failure_injection = if ($faultAfterFiles) { 'Rust write-stage injection; installation must still be started in the GUI. This is not a real graphics fault.' } else { 'None' }
     child_environment = [ordered]@{ TEMP = $tempDirectory; TMP = $tempDirectory; LOCALAPPDATA = $localDirectory }
     observation_limit_seconds = 600; capture_limit_per_stream_bytes = 4 * 1024 * 1024
     launch_method = 'ProcessStartInfo; WindowStyle=Normal, UseShellExecute=false, CreateNoWindow=true suppresses only an extra console; the application creates its visible GPUI window or native MessageBox.'

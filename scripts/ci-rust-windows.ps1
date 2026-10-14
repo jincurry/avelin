@@ -142,7 +142,7 @@ try {
     $pythonVersion = InvokeRecorded 'python-version' $python @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; print(sys.version)')
     $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/run-windows-maintenance-entry.ps1', 'tests/harness/run-windows-features.ps1', 'tests/harness/run-rust-all-users.ps1', 'tests/harness/windows-shell-link.ps1', 'tests/harness/check-m3-schemas.py', 'tests/harness/check-windows-feature-schemas.py', 'tests/harness/schema-requirements.txt')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/run-windows-maintenance-entry.ps1', 'tests/harness/run-windows-features.ps1', 'tests/harness/run-rust-all-users.ps1', 'tests/harness/windows-shell-link.ps1', 'tests/harness/check-m3-schemas.py', 'tests/harness/check-windows-feature-schemas.py', 'tests/harness/test-schema-encoding.py', 'tests/harness/schema-requirements.txt')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })
@@ -158,6 +158,7 @@ try {
     $env:CARGO_TARGET_DIR = $targetDirectory
     $null = InvokeRecorded 'schema-dependencies' $python @('-c', 'import importlib.util; names = ["jsonschema", "referencing", "attrs", "rpds"]; missing = [name for name in names if importlib.util.find_spec(name) is None]; assert not missing, "Schema validation dependencies missing; prepare tests/harness/schema-requirements.txt and set PYTHONPATH: " + ", ".join(missing); print("Schema dependencies available")')
     $null = InvokeRecorded 'schema-m3' $python @((Join-Path $projectRoot 'tests/harness/check-m3-schemas.py'))
+    $null = InvokeRecorded 'schema-report-encoding' $python @((Join-Path $projectRoot 'tests/harness/test-schema-encoding.py'))
     $null = InvokeRecorded 'schema-windows-features' $python @((Join-Path $projectRoot 'tests/harness/check-windows-feature-schemas.py'))
     $null = InvokeRecorded 'fmt' $rustup @('run', $RustToolchain, 'cargo', 'fmt', '--all', '--', '--check')
     # The verified toolchain host is x64 MSVC. Native-host output preserves the

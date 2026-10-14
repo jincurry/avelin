@@ -127,4 +127,41 @@ $caseCount++
 $machineFailed = Project 'machine-failed-run' $windowsEvidence -Failed -EvidenceDirectory 'all-users'
 Check ($machineFailed.status -ceq 'FAILED' -and $machineFailed.failed_command -ceq 'rust-all-users') 'Machine failure must remain visible'
 $caseCount++
+# A localized rollback message must not hide the worker's useful error class.
+# The worker detail is untrusted; only fixed enum codes may leave this fixture.
+foreach ($section in @('lifecycle', 'maintenance')) {
+    foreach ($variant in @('classified', 'missing', 'non-string')) {
+        $run = Join-Path $testRoot "$section-backend-$variant"
+        SaveJson (Join-Path $run 'summary.json') @{
+            status='FAILED'; commands=@(); failure=$privateMarker
+        }
+        $task = @{
+            result='Failed'; exit_code=3; coordinator_exit_code=3
+            diagnostic=@{code='AVELIN_TASK_FAILED';reason='升级失败，已恢复旧安装。'}
+            events=@(@{phase='cleanup_completed'})
+        }
+        if ($variant -ceq 'classified') {
+            $task.backend_terminal_detail = "CreateFileW C:\PrivateFixture\$privateMarker failed (os error 32)"
+        } elseif ($variant -ceq 'non-string') {
+            $task.backend_terminal_detail = @{ message=$privateMarker; path="C:\PrivateFixture\$privateMarker" }
+        }
+        $relative = if ($section -ceq 'lifecycle') { 'lifecycle/after-commit-upgrade.report.json' } else { 'maintenance/repair/repair-preserve.report.json' }
+        SaveJson (Join-Path $run $relative) $task
+        $output = Join-Path $run 'public.json'
+        $null = & $summarizer -RunDirectory $run -OutputPath $output -Commit ('b' * 40) -ValidationExitCode 1
+        $text = [IO.File]::ReadAllText($output)
+        Check (-not $text.Contains($privateMarker) -and -not $text.Contains('PrivateFixture') -and -not $text.Contains('CreateFileW')) 'Raw backend detail escaped the public projection'
+        $public = $text | ConvertFrom-Json -AsHashtable
+        Check ($public.status -ceq 'FAILED') 'Backend classification changed the failed outcome'
+        $last = $public[$section].last_task
+        Check ($null -ne $last -and $last.result -ceq 'Failed') 'Failed task was not projected'
+        Check (($last.reason_codes -join ',') -ceq 'unclassified_error') 'Localized display reason unexpectedly replaced backend evidence'
+        if ($variant -ceq 'classified') {
+            Check (($last.backend_reason_codes -join ',') -ceq 'io_error') 'Worker I/O failure class was lost behind localized rollback text'
+        } else {
+            Check ($last.backend_reason_codes.Count -eq 0) 'Absent or malformed worker detail invented a failure class'
+        }
+        $caseCount++
+    }
+}
 [ordered]@{ status='PASSED'; projection_cases=$caseCount; evidence=$testRoot } | ConvertTo-Json

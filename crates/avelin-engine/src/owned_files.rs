@@ -581,16 +581,181 @@ mod tests {
         fs,
         sync::atomic::{AtomicU32, Ordering},
     };
+
+    #[repr(C)]
+    struct AclSize {
+        count: u32,
+        used: u32,
+        free: u32,
+    }
+    #[repr(C)]
+    struct AceHeader {
+        kind: u8,
+        flags: u8,
+        size: u16,
+    }
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn GetSecurityInfo(
+            handle: Handle,
+            object: u32,
+            information: u32,
+            owner: *mut Handle,
+            group: *mut Handle,
+            dacl: *mut Handle,
+            sacl: *mut Handle,
+            descriptor: *mut Handle,
+        ) -> u32;
+        fn GetSecurityDescriptorControl(
+            descriptor: Handle,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+        fn GetAclInformation(acl: Handle, information: Handle, size: u32, class: u32) -> i32;
+        fn GetAce(acl: Handle, index: u32, ace: *mut Handle) -> i32;
+        fn ConvertSidToStringSidW(sid: *const c_void, text: *mut *mut u16) -> i32;
+    }
+
+    struct SecurityMemory(Handle);
+    impl Drop for SecurityMemory {
+        fn drop(&mut self) {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+    struct Ace {
+        flags: u8,
+        mask: u32,
+        sid: String,
+    }
+    struct SecuritySnapshot {
+        owner: String,
+        protected: bool,
+        allowed: Vec<Ace>,
+    }
+    fn sid_text(sid: Handle) -> String {
+        assert!(!sid.is_null());
+        let mut text = ptr::null_mut();
+        assert_ne!(unsafe { ConvertSidToStringSidW(sid, &mut text) }, 0);
+        let _memory = SecurityMemory(text.cast());
+        let mut length = 0;
+        while unsafe { *text.add(length) } != 0 {
+            length += 1;
+            assert!(length < 256);
+        }
+        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).unwrap()
+    }
+    fn security_snapshot(path: &Path) -> SecuritySnapshot {
+        // READ_CONTROL plus file attributes; BACKUP_SEMANTICS also permits the
+        // fixture directory. The existing open helper does not follow reparse points.
+        let file = open(path, 0x0002_0080, 3, 0x0200_0000).unwrap();
+        let (mut owner, mut dacl, mut descriptor) =
+            (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+        assert_eq!(
+            unsafe {
+                GetSecurityInfo(
+                    file.as_raw_handle(),
+                    1, // SE_FILE_OBJECT
+                    5, // OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+                    &mut owner,
+                    ptr::null_mut(),
+                    &mut dacl,
+                    ptr::null_mut(),
+                    &mut descriptor,
+                )
+            },
+            0
+        );
+        let _descriptor = SecurityMemory(descriptor);
+        assert!(!dacl.is_null(), "unexpected unrestricted DACL");
+        let (mut control, mut revision) = (0u16, 0u32);
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) },
+            0
+        );
+        let mut size = AclSize {
+            count: 0,
+            used: 0,
+            free: 0,
+        };
+        assert_ne!(
+            unsafe {
+                GetAclInformation(
+                    dacl,
+                    (&mut size as *mut AclSize).cast(),
+                    std::mem::size_of::<AclSize>() as u32,
+                    2, // AclSizeInformation
+                )
+            },
+            0
+        );
+        assert!(size.count <= 64);
+        let mut allowed = Vec::new();
+        for index in 0..size.count {
+            let mut ace = ptr::null_mut();
+            assert_ne!(unsafe { GetAce(dacl, index, &mut ace) }, 0);
+            let header = unsafe { &*ace.cast::<AceHeader>() };
+            // Fixtures and protected publication use ordinary access-allowed
+            // ACEs. Unexpected ACE types must fail this test, not be ignored.
+            assert_eq!(header.kind, 0);
+            assert!(header.size >= 12);
+            allowed.push(Ace {
+                flags: header.flags,
+                mask: unsafe { *ace.cast::<u8>().add(4).cast::<u32>() },
+                sid: sid_text(unsafe { ace.cast::<u8>().add(8).cast() }),
+            });
+        }
+        SecuritySnapshot {
+            owner: sid_text(owner),
+            protected: control & 0x1000 != 0, // SE_DACL_PROTECTED
+            allowed,
+        }
+    }
+    fn inheritable_fixture() -> Fixture {
+        // Applies only to the new test directory. No PowerShell/module
+        // autoloading is involved, including when CI is launched by pwsh 7.
+        let mut descriptor = ptr::null_mut();
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide("D:P(A;OICI;FA;;;WD)").as_ptr(),
+                    1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let _descriptor = SecurityMemory(descriptor);
+        let security = SecurityAttributes {
+            length: std::mem::size_of::<SecurityAttributes>() as u32,
+            descriptor,
+            inherit: 0,
+        };
+        let fixture = Fixture::with_security((&security as *const SecurityAttributes).cast());
+        let actual = security_snapshot(&fixture.0);
+        assert!(actual.allowed.iter().any(|ace| {
+            ace.sid == "S-1-1-0" && ace.flags & 3 == 3 && ace.mask & 0x1f01ff == 0x1f01ff
+        }));
+        fixture
+    }
     static NEXT: AtomicU32 = AtomicU32::new(0);
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
+            Self::with_security(ptr::null())
+        }
+        fn with_security(security: *const c_void) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "avelin-owned-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
-            fs::create_dir(&path).unwrap();
+            assert_ne!(
+                unsafe { CreateDirectoryW(wide(path.to_str().unwrap()).as_ptr(), security) },
+                0,
+                "create fixture directory: {}",
+                std::io::Error::last_os_error()
+            );
             Self(path)
         }
         fn name(&self, name: &str) -> String {
@@ -626,58 +791,53 @@ mod tests {
         remove_empty_directory(replacement.to_str().unwrap()).unwrap();
     }
     #[test]
+    fn native_acl_fixture_exposes_inherited_ordinary_user_write_permissions() {
+        let f = inheritable_fixture();
+        fs::write(f.name("target"), b"inherited fixture").unwrap();
+        let actual = security_snapshot(Path::new(&f.name("target")));
+        assert!(!actual.protected);
+        assert!(actual.allowed.iter().any(|ace| {
+            ace.sid == "S-1-1-0" && ace.flags & 0x10 != 0 && ace.mask & 0x1f01ff == 0x1f01ff
+        }));
+    }
+
+    #[test]
     fn machine_publication_protects_files_at_creation_and_rejects_unelevated_writes() {
-        let f = Fixture::new();
+        // Reproduce a shell-folder policy with an inheritable ordinary-user
+        // delete/write grant. Only this newly created fixture is changed.
+        let f = inheritable_fixture();
         fs::write(f.name("source"), b"machine shortcut fixture").unwrap();
         let scope = avelin_core::InstallScope::AllUsers;
         if !avelin_core::scope::is_elevated().unwrap() {
             assert!(publish_managed(scope, &f.name("source"), &f.name("target"), "").is_err());
             assert!(!Path::new(&f.name("target")).exists());
+            eprintln!("verified unelevated machine-publication rejection");
             return;
         }
 
-        // Reproduce a shell-folder policy with an inheritable ordinary-user
-        // delete/write grant. Only this newly created fixture is changed.
-        let grant = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-$ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:AVELIN_ACL_FIXTURE
-$sid = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
-$rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-$acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:AVELIN_ACL_FIXTURE -AclObject $acl
-"#])
-            .env("AVELIN_ACL_FIXTURE", &f.0)
-            .output()
-            .unwrap();
-        assert!(
-            grant.status.success(),
-            "{}",
-            String::from_utf8_lossy(&grant.stderr)
-        );
         let hash = publish_managed(scope, &f.name("source"), &f.name("target"), "").unwrap();
         assert_eq!(hash, avelin_core::hash_bytes(b"machine shortcut fixture"));
-        let inspect = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-$ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $env:AVELIN_ACL_TARGET
-if (-not $acl.AreAccessRulesProtected) { throw 'DACL inheritance remains enabled' }
-if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') { throw 'Unexpected owner' }
-$userRead = $false
-foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-    if ($rule.IsInherited) { throw 'Parent permission was inherited' }
-    if ($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 0x500D0156) -ne 0 -and $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Ordinary user has write/delete access' }
-    if ($rule.IdentityReference.Value -eq 'S-1-5-32-545' -and $rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 0x1200A9) -eq 0x1200A9) { $userRead = $true }
-}
-if (-not $userRead) { throw 'Public file is not readable/executable by users' }
-"#])
-            .env("AVELIN_ACL_TARGET", f.name("target"))
-            .output()
-            .unwrap();
+        let actual = security_snapshot(Path::new(&f.name("target")));
+        assert!(actual.protected, "DACL inheritance remains enabled");
+        assert_eq!(
+            actual.owner, "S-1-5-32-544",
+            "unexpected machine file owner"
+        );
+        for ace in &actual.allowed {
+            assert_eq!(ace.flags & 0x10, 0, "parent permission was inherited");
+            if ace.mask & 0x500d0156 != 0 {
+                assert!(
+                    matches!(ace.sid.as_str(), "S-1-5-18" | "S-1-5-32-544"),
+                    "ordinary user has write/delete access"
+                );
+            }
+        }
         assert!(
-            inspect.status.success(),
-            "{}",
-            String::from_utf8_lossy(&inspect.stderr)
+            actual
+                .allowed
+                .iter()
+                .any(|ace| { ace.sid == "S-1-5-32-545" && ace.mask & 0x1200a9 == 0x1200a9 }),
+            "public file is not readable/executable by users"
         );
         assert!(publish_managed(scope, &f.name("source"), &f.name("target"), "").is_err());
         assert!(
@@ -691,6 +851,7 @@ if (-not $userRead) { throw 'Public file is not readable/executable by users' }
         );
         assert!(!Path::new(&f.name("hardlink")).exists());
         assert_eq!(delete(&f.name("target"), &hash).unwrap(), "deleted");
+        eprintln!("verified elevated machine-publication ACL, collision and hash checks");
     }
 
     #[test]

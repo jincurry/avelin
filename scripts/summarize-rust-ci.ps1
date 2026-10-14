@@ -103,7 +103,7 @@ $maintenanceCases = @(
     'repair-missing-resources-preserves-modified', 'repair-reject-wrong-manifest', 'repair-reject-wrong-version',
     'repair-explicit-overwrite-keeps-backup', 'repair-repeat-is-safe'
 )
-$commandNames += 'rust-maintenance', 'rust-optional-components', 'windows-maintenance', 'windows-features', 'rust-all-users', 'schema-dependencies', 'schema-m3', 'schema-windows-features'
+$commandNames += 'rust-maintenance', 'rust-optional-components', 'windows-maintenance', 'windows-features', 'rust-all-users', 'schema-dependencies', 'schema-m3', 'schema-report-encoding', 'schema-windows-features'
 $functionNames += 'Pass', 'NewCase', 'Operation', 'UninstallArguments', 'WaitMaintenancePause', 'StopPausedBackend', 'Recover', 'AssertUnchangedState', 'LiveIdentitySnapshot', 'RecoveryCases', 'ShortcutSnapshot', 'RepairEvidence', 'RepairCases', 'StartFixtureProcess', 'FinishFixtureProcess', 'InvokeFixtureProcess', 'VerifyVersion', 'RegistrySnapshot', 'SameSnapshot'
 $report = ReadJson 'summary.json'
 $lifecycle = ReadJson 'lifecycle/summary.json'
@@ -202,7 +202,10 @@ if ($latestTask) {
         if ($candidate) { $phase = $candidate }
     }
     $diagnostic = if ($task['diagnostic'] -is [Collections.IDictionary]) { $task['diagnostic'] } else { @{} }
-    $public.lifecycle.last_task = @{ name = $latestTask.name; result = SelectEnum $task['result'] @('Succeeded', 'Failed', 'Cancelled', 'Unknown', 'NotStarted'); exit_code = Number $task['exit_code']; coordinator_exit_code = Number $task['coordinator_exit_code']; last_phase = $phase; diagnostic_code = SelectEnum $diagnostic['code'] @('AVELIN_TASK_FAILED', 'AVELIN_RESULT_UNKNOWN'); reason_codes = @(ReasonCodes $diagnostic['reason']) }
+    # A confirmed rollback can replace the displayed reason with a generic
+    # localized message. Classify the retained worker detail separately, using
+    # the same fixed codes; never export its free text, paths or identities.
+    $public.lifecycle.last_task = @{ name = $latestTask.name; result = SelectEnum $task['result'] @('Succeeded', 'Failed', 'Cancelled', 'Unknown', 'NotStarted'); exit_code = Number $task['exit_code']; coordinator_exit_code = Number $task['coordinator_exit_code']; last_phase = $phase; diagnostic_code = SelectEnum $diagnostic['code'] @('AVELIN_TASK_FAILED', 'AVELIN_RESULT_UNKNOWN'); reason_codes = @(ReasonCodes $diagnostic['reason']); backend_reason_codes = @(ReasonCodes $task['backend_terminal_detail']) }
 }
 foreach ($point in @('prepared', 'after-first-publish', 'after-commit')) {
     foreach ($victim in @('backend', 'coordinator')) {
@@ -240,7 +243,7 @@ if ($latestMaintenanceProcess) {
 if ($latestMaintenanceTask) {
     $latest = $latestMaintenanceTask; $task = ReadJson "$($latest.relative).report.json"
     $diagnostic = if ($task['diagnostic'] -is [Collections.IDictionary]) { $task['diagnostic'] } else { @{} }
-    $public.maintenance.last_task = @{ name = $latest.name; case = $latest.case; result = SelectEnum $task['result'] @('Succeeded', 'Failed', 'Cancelled', 'Unknown', 'NotStarted'); coordinator_exit_code = Number $task['coordinator_exit_code']; maintenance_status = SelectEnum $task['maintenance_status'] @('RecoveryChecked', 'RecoveryComplete', 'RepairComplete', 'RepairPreservedConflicts'); reason_codes = @(ReasonCodes $diagnostic['reason']) }
+    $public.maintenance.last_task = @{ name = $latest.name; case = $latest.case; result = SelectEnum $task['result'] @('Succeeded', 'Failed', 'Cancelled', 'Unknown', 'NotStarted'); coordinator_exit_code = Number $task['coordinator_exit_code']; maintenance_status = SelectEnum $task['maintenance_status'] @('RecoveryChecked', 'RecoveryComplete', 'RepairComplete', 'RepairPreservedConflicts'); reason_codes = @(ReasonCodes $diagnostic['reason']); backend_reason_codes = @(ReasonCodes $task['backend_terminal_detail']) }
 }
 $output = [IO.Path]::GetFullPath($OutputPath)
 if (Test-Path -LiteralPath $output) { throw 'Public output file already exists.' }

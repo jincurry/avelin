@@ -242,10 +242,13 @@ def main():
         positives.append("actual-m3/recorded-upgrade-lineage")
         evidence.append({"generation": "M3", "directory": str(run), "status": "PASS"})
 
+    # Some negative-case labels contain localized component names. ASCII JSON
+    # escapes preserve those values and also work with redirected Windows stdout
+    # in legacy code pages; the parent's UTF-8 decoder does not configure Python.
     print(json.dumps({"status": "PASS", "schemas": 3, "positive_cases": positives,
                       "negative_cases": negatives, "evidence": evidence,
                       "scope": "Offline structure and saved-evidence linkage only; SemVer, Windows paths, disk state, recovery and GUI require separate validation."},
-                     ensure_ascii=False, indent=2))
+                     ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":

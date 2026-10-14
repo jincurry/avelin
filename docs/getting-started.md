@@ -58,6 +58,8 @@ paths = ["MyApp.exe"]
 
 以上最小例子只有一个 EXE；真实目录的每个文件都需要归属。当前 `init` 会把扫描到的全部文件加入 `core.paths`。只有 `core` 时不显示组件选择区。需要选装时，将文件从 `core` 拆出并定义 `[[components]]`，见[可选组件使用指南](optional-components.md)与[通用示例](../examples/components/README.md)。旧 schema 1 配置仍受支持。
 
+需要运行库前置检查、HTTPS 完整包更新或全用户安装时，在 schema 2 中分别添加 `[[prerequisites]]`、`[updates]`、`install.scope = "all_users"`。按应用实际需求配置，省略时保持当前用户离线安装。字段与完整示例见[Windows 部署指南](windows-deployment.md)。
+
 组件能力需要当前源码构建的配套工具，已发布的 `v0.1.0-preview.1` 二进制尚不支持。
 
 品牌配置参考 [Nimbus 配置](../examples/nimbus/avelin-m1.toml)、[中文覆盖](../examples/nimbus/locales/zh-CN.json)与[英文覆盖](../examples/nimbus/locales/en-US.json)。展示结构见 [presentation schema](schemas/presentation.schema.json)，仅支持注册的键和正确占位符。

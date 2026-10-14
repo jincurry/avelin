@@ -216,6 +216,9 @@ mod tests {
     fn manifest() -> Manifest {
         Manifest {
             schema_version: SCHEMA_VERSION,
+            install_scope: crate::InstallScope::CurrentUser,
+            prerequisites: vec![],
+            updates: None,
             components: vec![],
             app_id: "dev.avelin.native-fixture".into(),
             app_name: "Native fixture".into(),

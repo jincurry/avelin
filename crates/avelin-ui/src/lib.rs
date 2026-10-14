@@ -37,6 +37,10 @@ pub struct UiOptions {
     pub app_version: String,
     pub install_dir: PathBuf,
     pub operation: avelin_core::Operation,
+    /// Validated package scope. Machine installations have a fixed directory.
+    pub install_scope: avelin_core::InstallScope,
+    /// The host verified an installed product with a configured update feed.
+    pub allow_updates: bool,
     /// Verified installed version for an in-place upgrade; supplied by the host.
     pub previous_version: Option<String>,
     /// Read-only maintenance findings checked by the host before confirmation.
@@ -72,6 +76,8 @@ impl Default for UiOptions {
             app_version: "2.4.0".into(),
             install_dir: base.join("AvelinDemo").join("Nimbus"),
             operation: avelin_core::Operation::Install,
+            install_scope: avelin_core::InstallScope::CurrentUser,
+            allow_updates: false,
             previous_version: None,
             maintenance_details: Vec::new(),
             repair_overwrite: false,

@@ -208,7 +208,8 @@ fn launch_installed_uninstaller() -> Result<i32> {
         receipt.selection(&manifest)?,
         avelin_core::SelectionSource::Inherited,
     )?;
-    validate_candidate(&plan, &manifest, &receipt)?;
+    validate_candidate_identity(&plan, &manifest, &receipt)?;
+    avelin_core::scope::validate_target(manifest.install_scope, root)?;
     ensure!(
         receipt.uninstaller_sha256.as_deref() == Some(worker.sha256()?.as_str()),
         "installed uninstaller was changed"
@@ -258,11 +259,15 @@ fn launch_installed_uninstaller() -> Result<i32> {
 }
 
 fn verify_session(session: &Path, plan: &InstallPlan, coordinator_pid: u32) -> Result<()> {
+    avelin_core::scope::require_elevation(plan.install_scope)?;
+    avelin_core::scope::validate_target(plan.install_scope, &plan.install_dir)?;
+    avelin_core::scope::validate_session(plan.install_scope, session)?;
     use avelin_core::session::{SessionRecord, running_process};
     let (_pin, bytes) = read_pinned(&session.join("session.json"), 128 * 1024)?;
     let record: SessionRecord = serde_json::from_slice(&bytes)?;
     ensure!(
         record.schema_version == 1
+            && record.install_scope == plan.install_scope
             && record.task_id == plan.task_id
             && record.app_id == plan.app_id
             && record.operation == plan.operation.as_str()
@@ -287,12 +292,30 @@ fn verify_session(session: &Path, plan: &InstallPlan, coordinator_pid: u32) -> R
 }
 
 fn validate_candidate(plan: &InstallPlan, manifest: &Manifest, receipt: &Receipt) -> Result<()> {
+    validate_candidate_identity(plan, manifest, receipt)?;
+    avelin_core::scope::validate_owned_installation(
+        manifest.install_scope,
+        &plan.install_dir,
+        &receipt.user_sid,
+        &plan.user_sid,
+    )
+}
+
+// Read-only bootstrap runs before UAC. It verifies the package-bound identity
+// and protected target, then lets the coordinator request elevation.
+fn validate_candidate_identity(
+    plan: &InstallPlan,
+    manifest: &Manifest,
+    receipt: &Receipt,
+) -> Result<()> {
     receipt.validate_manifest(manifest)?;
     let selected = avelin_core::resolve_selection(manifest, &plan.selected_components)?;
     ensure!(
         receipt.app_id == plan.app_id
             && receipt.app_version == plan.app_version
-            && receipt.user_sid == plan.user_sid
+            && receipt.install_scope == plan.install_scope
+            && (receipt.user_sid == plan.user_sid
+                || plan.install_scope == avelin_core::InstallScope::AllUsers)
             && receipt.manifest_sha256 == plan.manifest_sha256
             && same_path(Path::new(&receipt.install_dir), &plan.install_dir)
             && receipt.files == selected.files,
@@ -301,6 +324,10 @@ fn validate_candidate(plan: &InstallPlan, manifest: &Manifest, receipt: &Receipt
     avelin_core::safe_id(&receipt.installation_id)?;
     avelin_core::safe_id(&receipt.commit_id)?;
     if plan.operation != Operation::Uninstall {
+        ensure!(
+            receipt.user_sid == plan.user_sid,
+            "new receipt must identify the executing user"
+        );
         ensure!(
             receipt.task_id == plan.task_id,
             "candidate is from another task"

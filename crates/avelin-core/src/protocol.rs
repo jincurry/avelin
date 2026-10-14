@@ -25,6 +25,10 @@ pub enum TaskCommand {
     Cancel,
     /// Explicit post-install action; the coordinator must revalidate the installed entry.
     LaunchInstalled,
+    /// Explicit maintenance-only network action; never starts an install task.
+    CheckForUpdates,
+    /// Download, validate, and hand off the previously discovered update.
+    DownloadUpdate,
 }
 
 // Serde ignores extra fields for internally tagged unit variants. Decode via
@@ -46,6 +50,8 @@ enum TaskCommandWire {
     },
     Cancel {},
     LaunchInstalled {},
+    CheckForUpdates {},
+    DownloadUpdate {},
 }
 
 impl<'de> Deserialize<'de> for TaskCommand {
@@ -68,6 +74,8 @@ impl<'de> Deserialize<'de> for TaskCommand {
             },
             TaskCommandWire::Cancel {} => Self::Cancel,
             TaskCommandWire::LaunchInstalled {} => Self::LaunchInstalled,
+            TaskCommandWire::CheckForUpdates {} => Self::CheckForUpdates,
+            TaskCommandWire::DownloadUpdate {} => Self::DownloadUpdate,
         })
     }
 }
@@ -84,6 +92,12 @@ pub enum TaskResponse {
     /// new Start request after the user resolves the reported file usage.
     PreflightBlocked {
         detail: String,
+    },
+    /// Network and handoff feedback does not change the current task result.
+    UpdateStatus {
+        available_version: Option<String>,
+        detail: String,
+        launched: bool,
     },
 }
 
@@ -432,6 +446,38 @@ mod tests {
             assert!(serde_json::from_value::<TaskResponse>(invalid).is_err());
         }
         assert!(serde_json::from_value::<TaskSnapshot>(value).is_err());
+    }
+
+    #[test]
+    fn update_commands_are_strict_and_feedback_is_not_a_task_result() {
+        for (wire, command) in [
+            ("check_for_updates", TaskCommand::CheckForUpdates),
+            ("download_update", TaskCommand::DownloadUpdate),
+        ] {
+            let value = json!({"command":wire});
+            assert_eq!(
+                serde_json::from_value::<TaskCommand>(value.clone()).unwrap(),
+                command
+            );
+            assert_eq!(serde_json::to_value(command).unwrap(), value);
+            assert!(
+                serde_json::from_value::<TaskCommand>(
+                    json!({"command":wire,"url":"https://untrusted.invalid"})
+                )
+                .is_err()
+            );
+        }
+        let response = TaskResponse::UpdateStatus {
+            available_version: Some("2.0.0".into()),
+            detail: "validated update".into(),
+            launched: false,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serde_json::from_value::<TaskResponse>(value.clone()).unwrap(),
+            response
+        );
+        assert!(serde_json::from_value::<TaskResult>(value).is_err());
     }
 
     #[test]

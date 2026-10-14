@@ -266,7 +266,9 @@ NewText (Join-Path $kit 'README.md') @'
 
 中断后保留原 Setup 和会话证据。`avelin-cli recover --session <原会话目录> --setup <原Setup>` 先只读检查，确认后添加 `--apply` 执行验证过的回滚或提交确认；也可在原 Setup 的恢复确认页操作。活动进程、身份不符、证据篡改和用户后改冲突均拒绝恢复。详见 `docs/maintenance.md`。
 
-不支持全用户安装、服务或驱动、在线下载、差分更新、无人确认的自动恢复或任意脚本钩子。Rust 载荷当前未压缩，每层嵌入区域上限 1 GiB，组件和元数据也占用空间。无法确认恢复结果时返回 Unknown 并保留事务证据；先诊断现场。详见 `docs/compatibility.md` 和 `docs/cli.md`。
+配置可开启前置运行库检测、HTTPS 完整包更新和全用户安装；默认仍为当前用户离线安装。全用户范围固定在系统 Program Files 下，写入需要管理员令牌；更新源必须由发布者配置为 HTTPS，下载核验后复用原有升级流程。配置与发布命令见 `docs/windows-deployment.md`。
+
+不支持服务或驱动、差分更新、无人确认的自动恢复或任意脚本钩子。Rust 载荷当前未压缩，每层嵌入区域上限 1 GiB，组件和元数据也占用空间。无法确认恢复结果时返回 Unknown 并保留事务证据；先诊断现场。详见 `docs/compatibility.md` 和 `docs/cli.md`。
 
 ## 完整性、来源与许可
 

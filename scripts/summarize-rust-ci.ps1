@@ -103,7 +103,7 @@ $maintenanceCases = @(
     'repair-missing-resources-preserves-modified', 'repair-reject-wrong-manifest', 'repair-reject-wrong-version',
     'repair-explicit-overwrite-keeps-backup', 'repair-repeat-is-safe'
 )
-$commandNames += 'rust-maintenance', 'rust-optional-components', 'windows-maintenance'
+$commandNames += 'rust-maintenance', 'rust-optional-components', 'windows-maintenance', 'windows-features', 'rust-all-users', 'schema-dependencies', 'schema-m3', 'schema-windows-features'
 $functionNames += 'Pass', 'NewCase', 'Operation', 'UninstallArguments', 'WaitMaintenancePause', 'StopPausedBackend', 'Recover', 'AssertUnchangedState', 'LiveIdentitySnapshot', 'RecoveryCases', 'ShortcutSnapshot', 'RepairEvidence', 'RepairCases', 'StartFixtureProcess', 'FinishFixtureProcess', 'InvokeFixtureProcess', 'VerifyVersion', 'RegistrySnapshot', 'SameSnapshot'
 $report = ReadJson 'summary.json'
 $lifecycle = ReadJson 'lifecycle/summary.json'
@@ -111,10 +111,13 @@ $interruption = ReadJson 'interruption/summary.json'
 $maintenance = ReadJson 'maintenance/summary.json'
 $optionalComponents = ReadJson 'optional-components/summary.json'
 $windowsMaintenance = ReadJson 'windows-maintenance/summary.json'
+$windowsFeatures = ReadJson 'windows-features/summary.json'
+$allUsers = ReadJson 'all-users/summary.json'
 $package = ReadJson 'package/packaging-verification.json'
 $public = [ordered]@{
-    schema_version = 4; status = 'FAILED'; commit = $Commit; runner = 'windows-2025'; engine = 'rust'
+    schema_version = 5; status = 'FAILED'; commit = $Commit; runner = 'windows-2025'; engine = 'rust'
     lifecycle_case_count = 0; interruption_case_count = 0; maintenance_case_count = 0; optional_component_case_count = 0; windows_maintenance_case_count = 0
+    windows_feature_case_count = 0; windows_feature_status = $null; all_users_case_count = 0; all_users_status = $null; non_elevated_rejection_status = $null
     package_sha256 = $null; failed_command = $null; last_command = $null; last_command_status = $null
     completed_commands = 0; failure_category = 'preparation_or_invocation_failed'
     error_codes = @(ReasonCodes $report['failure']); user_shell_folders = @()
@@ -125,6 +128,14 @@ if ($ValidationExitCode -eq 0 -and $report['status'] -ceq 'PASSED') { $public.st
 elseif ($report.Count) { $public.failure_category = 'verification_failed_after_command' }
 $public.optional_component_case_count = @($optionalComponents['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['status'] -is [string] -and $_['status'] -ceq 'PASSED' }).Count
 $public.windows_maintenance_case_count = @($windowsMaintenance['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['status'] -is [string] -and $_['status'] -ceq 'PASSED' }).Count
+$public.windows_feature_status = SelectEnum $windowsFeatures['status'] @('RUNNING', 'PASSED', 'FAILED')
+$public.windows_feature_case_count = @($windowsFeatures['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['status'] -is [string] -and $_['status'] -ceq 'PASSED' }).Count
+$public.all_users_status = SelectEnum $allUsers['status'] @('RUNNING', 'PASSED', 'FAILED', 'NeedsElevation')
+if ($public.all_users_status -cne 'NeedsElevation') {
+    $public.all_users_case_count = @($allUsers['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['status'] -is [string] -and $_['status'] -ceq 'PASSED' }).Count
+}
+$denialCases = @($windowsFeatures['cases'] | Where-Object { $_ -is [Collections.IDictionary] -and $_['label'] -ceq 'all-users-silent-refuses-without-elevation' })
+if ($denialCases.Count -eq 1) { $public.non_elevated_rejection_status = SelectEnum $denialCases[0]['status'] @('PASSED', 'FAILED', 'NeedsNonElevated') }
 foreach ($command in @($report['commands'])) {
     if ($command -isnot [Collections.IDictionary]) { continue }
     $name = SelectEnum $command['name'] $commandNames

@@ -4,7 +4,9 @@ use super::operation_view_tests::connected;
 use super::{Operation, UiCommand, UiOptions, UiPhase};
 use crate::UiComponent;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{AppContext, InputEvent, KeyUpEvent, Keystroke, TestAppContext};
+use gpui_kit::{
+    AppContext, InputEvent, KeyUpEvent, Keystroke, ScrollDelta, TestAppContext, point, px, size,
+};
 use std::sync::mpsc::TryRecvError;
 
 fn options(operation: Operation) -> UiOptions {
@@ -140,6 +142,63 @@ fn maintenance_switch_preserves_choices_and_modify_rejects_noop(cx: &mut TestApp
         operation: Some(Operation::Modify), selected_components: Some(ids),
         desktop_shortcut: false, start_menu_shortcut: false, ..
     } if ids == ["core", "tools"]));
+}
+
+#[gpui_kit::test]
+fn all_users_maintenance_preserves_scope_and_scrolls_to_components_in_small_window(
+    cx: &mut TestAppContext,
+) {
+    let (fixture, commands, _snapshots, _responses) = connected(
+        cx,
+        UiOptions {
+            install_scope: avelin_core::InstallScope::AllUsers,
+            install_dir: r"C:\Program Files\AvelinMachineGuiAcceptance".into(),
+            ..options(Operation::Repair)
+        },
+    );
+    cx.simulate_window_resize(fixture.window.into(), size(px(680.), px(540.)));
+    cx.update_window(fixture.window.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("maintenance-modify", cx);
+        window.click("language", cx);
+        window.render_frame(cx);
+        assert!(window.find("close").visible());
+        window.scroll("content", ScrollDelta::Pixels(point(px(0.), px(-260.))), cx);
+        let component = window.find("component-tools");
+        let viewport = window.find("content").bounds();
+        assert!(component.visible());
+        assert!(component.bounds().center().y >= viewport.origin.y);
+        assert!(component.bounds().center().y < viewport.origin.y + viewport.size.height);
+        window.click("component-tools", cx);
+        assert_eq!(window.find("component-tools").checked(), Some(true));
+        assert!(window.find("close").visible());
+    })
+    .unwrap();
+    fixture.update(cx, |view, _, cx| {
+        assert_eq!(
+            view.options.install_scope,
+            avelin_core::InstallScope::AllUsers
+        );
+        assert_eq!(view.options.components.len(), 2);
+        assert_eq!(view.options.operation, Operation::Modify);
+        assert_eq!(view.footer_status(), "All users · Installation maintenance");
+        assert!(view.content_scroll.offset().y < px(0.));
+        assert!(view.may_close(cx));
+        assert!(!view.shows_launch());
+    });
+    cx.update_window(fixture.window.into(), |_, window, cx| {
+        window.scroll("content", ScrollDelta::Pixels(point(px(0.), px(1000.))), cx);
+        window.click("maintenance-repair", cx);
+        window.click("maintenance-modify", cx);
+    })
+    .unwrap();
+    fixture.update(cx, |view, _, cx| {
+        assert!(view.options.components[1].selected);
+        assert_eq!(view.content_scroll.offset(), point(px(0.), px(0.)));
+        assert_eq!(view.footer_status(), "All users · Installation maintenance");
+        assert!(view.may_close(cx));
+    });
+    assert_eq!(commands.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[gpui_kit::test]

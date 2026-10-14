@@ -2,7 +2,11 @@ use anyhow::{Context, Result, bail, ensure};
 pub mod components;
 pub mod model;
 pub mod native_payload;
+pub mod prerequisites;
 pub mod presentation;
+pub mod scope;
+pub mod updates;
+pub use scope::InstallScope;
 pub mod protocol;
 pub mod resource_usage;
 pub mod session;
@@ -48,6 +52,12 @@ pub struct FileResource {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "InstallScope::is_current_user")]
+    pub install_scope: InstallScope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<prerequisites::Requirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<updates::UpdateConfig>,
     pub app_id: String,
     pub app_name: String,
     pub app_version: String,
@@ -71,6 +81,8 @@ pub struct Manifest {
 #[serde(deny_unknown_fields)]
 pub struct Receipt {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "InstallScope::is_current_user")]
+    pub install_scope: InstallScope,
     pub app_id: String,
     pub app_version: String,
     pub installation_id: String,
@@ -251,6 +263,17 @@ pub fn install_root(path: &Path) -> Result<()> {
 
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
+        prerequisites::validate(&self.prerequisites)?;
+        if let Some(config) = &self.updates {
+            config.validate()?;
+        }
+        ensure!(
+            self.schema_version != SCHEMA_VERSION
+                || (self.install_scope.is_current_user()
+                    && self.prerequisites.is_empty()
+                    && self.updates.is_none()),
+            "installation scope, prerequisites and updates require manifest schema 2"
+        );
         ensure!(
             matches!(
                 self.schema_version,
@@ -573,6 +596,9 @@ mod tests {
     fn manifest(paths: &[&str]) -> Manifest {
         Manifest {
             schema_version: SCHEMA_VERSION,
+            install_scope: InstallScope::CurrentUser,
+            prerequisites: vec![],
+            updates: None,
             components: vec![],
             app_id: "com.example.core-test".into(),
             app_name: "中文 ${Brand}".into(),

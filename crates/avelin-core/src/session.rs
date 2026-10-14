@@ -15,6 +15,8 @@ pub struct ProcessIdentity {
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "crate::InstallScope::is_current_user")]
+    pub install_scope: crate::InstallScope,
     pub task_id: String,
     pub app_id: String,
     pub operation: String,

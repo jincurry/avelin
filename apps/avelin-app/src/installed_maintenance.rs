@@ -60,10 +60,15 @@ fn prepare_inputs(root: &Path, user_sid: &str) -> Result<PreparedMaintenance> {
 
     // Create every copy while the verified sources and their ancestor directories
     // are pinned. Return only private-copy handles; source handles close here.
-    let directory = execution_files::create_private_session(
-        &std::env::temp_dir().join("AvelinM0"),
-        "maintenance-bootstrap",
-    )?;
+    let base = if manifest.install_scope == avelin_core::InstallScope::AllUsers {
+        avelin_core::scope::ensure_machine_state()?.join("sessions")
+    } else {
+        std::env::temp_dir().join("AvelinM0")
+    };
+    let directory = execution_files::create_private_session(&base, "maintenance-bootstrap")?;
+    if manifest.install_scope == avelin_core::InstallScope::AllUsers {
+        avelin_core::scope::protect_machine_session(directory.path())?;
+    }
     let runtime = execution_files::copy_file(&directory, "maintenance-coordinator.exe", &runtime)?;
     let backend = execution_files::copy_file(&directory, "maintenance-worker.exe", &backend)?;
     let manifest = execution_files::create_file(&directory, "manifest.json", &manifest_bytes)?;

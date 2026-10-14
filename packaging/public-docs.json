@@ -32,6 +32,10 @@
     "schemas/model.schema.json",
     "schemas/presentation.example.json",
     "schemas/presentation.schema.json",
-    "schemas/protocol.schema.json"
+    "schemas/protocol.schema.json",
+    "windows-deployment.md",
+    "schemas/updates.schema.json",
+    "schemas/examples/windows-manifest.json",
+    "schemas/examples/update-release.json"
   ]
 }

@@ -123,13 +123,15 @@ struct AppLock {
     retain: bool,
 }
 impl AppLock {
-    fn acquire(id: &str, sid: &str) -> Result<Self> {
-        let base =
-            PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA is missing")?)
-                .join("Avelin/M0/locks");
+    fn acquire(scope: avelin_core::InstallScope, id: &str, sid: &str) -> Result<Self> {
+        avelin_core::scope::require_elevation(scope)?;
+        if scope == avelin_core::InstallScope::AllUsers {
+            avelin_core::scope::ensure_machine_state()?;
+        }
+        let path = avelin_core::scope::product_lock_path(scope, id, sid)?;
+        let base = path.parent().context("lock parent missing")?;
         reject_reparse(&base)?;
         fs::create_dir_all(&base)?;
-        let path = base.join(format!("{id}-{}.lock", &hash_bytes(sid.as_bytes())[..16]));
         let mut file=OpenOptions::new().write(true).create_new(true).open(&path)
             .context("another task or an unresolved interrupted task holds the product lock; inspect logs before recovery")?;
         writeln!(file, "{}", std::process::id())?;
@@ -495,6 +497,10 @@ fn ini(directory: &PinnedDirectory, name: &str, value: &str) -> Result<PinnedFil
     execution_files::create_file(directory, name, &bytes)
 }
 
+fn default_target(manifest: &Manifest) -> Result<PathBuf> {
+    avelin_core::scope::default_install_root(manifest.install_scope, &manifest.directory_name)
+}
+
 fn environment(args: &Args) -> Result<(Arc<PinnedFile>, Manifest)> {
     if let (Some(backend), Some(manifest)) = (&args.backend, &args.manifest) {
         // Resolve caller-supplied relative inputs once, then pin the resulting path.
@@ -513,7 +519,7 @@ fn environment(args: &Args) -> Result<(Arc<PinnedFile>, Manifest)> {
     let package = PinnedFile::open(&std::env::current_exe()?)?;
     let (backend, manifest) = avelin_core::embedded(package.path())?
         .context("no embedded payload; pass --backend and --manifest or --ui-demo")?;
-    let folder = session_root(args)?;
+    let folder = session_root(args, manifest.install_scope)?;
     let backend = execution_files::create_file(&folder, "backend.exe", &backend)?;
     resources::validate_backend(&backend, &manifest)?;
     Ok((Arc::new(backend), manifest))
@@ -530,7 +536,13 @@ fn preview_manifest(path: Option<&Path>) -> Result<Option<Manifest>> {
     .transpose()
 }
 
-fn session_root(args: &Args) -> Result<PinnedDirectory> {
+fn session_root(args: &Args, scope: avelin_core::InstallScope) -> Result<PinnedDirectory> {
+    if scope == avelin_core::InstallScope::AllUsers {
+        let base = avelin_core::scope::ensure_machine_state()?.join("sessions");
+        let directory = execution_files::create_private_session(&base, "session")?;
+        avelin_core::scope::protect_machine_session(directory.path())?;
+        return Ok(directory);
+    }
     let base = if let Some(report) = &args.report {
         std::path::absolute(report)?
             .parent()
@@ -548,7 +560,52 @@ pub fn entry(mut args: Args) -> Result<i32> {
         wait_for_parent(pid)?;
     }
     if args.maintenance {
+        let root = std::path::absolute(
+            args.install_dir
+                .as_ref()
+                .context("maintenance directory required")?,
+        )?;
+        let input = PinnedFile::open(&root.join(".avelin/manifest.json"))?;
+        let manifest: Manifest = serde_json::from_slice(&input.read_bytes()?)?;
+        manifest.validate()?;
+        avelin_core::scope::validate_target(manifest.install_scope, &root)?;
+        if manifest.install_scope == avelin_core::InstallScope::AllUsers
+            && !avelin_core::scope::is_elevated()?
+        {
+            ensure!(
+                !args.silent,
+                "AVELIN_ELEVATION_REQUIRED: run all-users silent maintenance from an elevated terminal"
+            );
+            return crate::elevation::relaunch();
+        }
+        drop(input);
         return launch_installed_maintenance(&args);
+    }
+    if !args.ui_demo {
+        // Inspect package scope before extracting a worker or touching machine state.
+        let input = PinnedFile::open(&std::path::absolute(
+            args.manifest
+                .as_ref()
+                .cloned()
+                .unwrap_or(std::env::current_exe()?),
+        )?)?;
+        let manifest: Manifest = if args.manifest.is_some() {
+            serde_json::from_slice(&input.read_bytes()?)?
+        } else {
+            avelin_core::embedded(input.path())?
+                .context("no embedded package")?
+                .1
+        };
+        manifest.validate()?;
+        if manifest.install_scope == avelin_core::InstallScope::AllUsers
+            && !avelin_core::scope::is_elevated()?
+        {
+            ensure!(
+                !args.silent,
+                "AVELIN_ELEVATION_REQUIRED: run all-users silent installation from an elevated terminal"
+            );
+            return crate::elevation::relaunch();
+        }
     }
     if args.operation == Operation::Uninstall {
         if let Some(root) = &args.install_dir {
@@ -560,7 +617,7 @@ pub fn entry(mut args: Args) -> Result<i32> {
                 let receipt =
                     resources::read_receipt(&manifest, root, &transport::current_user_sid()?)?;
                 validate_uninstaller(root, &backend, &receipt)?;
-                let session = session_root(&args)?;
+                let session = session_root(&args, manifest.install_scope)?;
                 let source = PinnedFile::open(&executable)?;
                 ensure!(
                     manifest.runtime_sha256.as_deref() == Some(source.sha256()?.as_str()),
@@ -634,10 +691,11 @@ pub fn entry(mut args: Args) -> Result<i32> {
         // An interrupted registration write can leave incomplete values. Find
         // retained task evidence before attempting ordinary registration parsing.
         if args.operation == Operation::Install && requests_gui(&args) {
-            let probe_target = args.install_dir.clone().unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-                    .join(&manifest.directory_name)
-            });
+            let probe_target = args
+                .install_dir
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(|| default_target(&manifest))?;
             let pending = match crate::maintenance::pending_session_from_lock(
                 &manifest,
                 &transport::current_user_sid()?,
@@ -677,7 +735,7 @@ pub fn entry(mut args: Args) -> Result<i32> {
             // inside the engine, including legitimately partial writes.
             None
         } else {
-            crate::upgrade::registration(&manifest.app_id)?
+            crate::upgrade::registration(manifest.install_scope, &manifest.app_id)?
         };
         let mut discovered_target = args
             .install_dir
@@ -687,10 +745,8 @@ pub fn entry(mut args: Args) -> Result<i32> {
                     .as_ref()
                     .map(|r| PathBuf::from(&r.install_location))
             })
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-                    .join(&manifest.directory_name)
-            });
+            .map(Ok)
+            .unwrap_or_else(|| default_target(&manifest))?;
         if args.operation == Operation::Install && requests_gui(&args) {
             let pending = match crate::maintenance::pending_session(&manifest, &discovered_target)?
             {
@@ -809,10 +865,11 @@ pub fn entry(mut args: Args) -> Result<i32> {
             validate_launch(&args)?;
         }
     }
-    let selection_target = args.install_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-            .join(&manifest.directory_name)
-    });
+    let selection_target = args
+        .install_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| default_target(&manifest))?;
     args.component_context = Some(crate::component_selection::resolve(
         &manifest,
         &selection_target,
@@ -821,6 +878,10 @@ pub fn entry(mut args: Args) -> Result<i32> {
         args.components.as_deref(),
         requests_gui(&args),
     )?);
+    if manifest.install_scope == avelin_core::InstallScope::AllUsers {
+        avelin_core::scope::validate_target(manifest.install_scope, &selection_target)?;
+        args.install_dir = Some(selection_target);
+    }
     if requests_gui(&args) {
         #[cfg(feature = "gui")]
         {
@@ -832,6 +893,9 @@ pub fn entry(mut args: Args) -> Result<i32> {
         );
     }
     let (backend, usage) = crate::preflight::inspect_with_backend(&args, &manifest, backend)?;
+    if let Some(report) = crate::preflight::prerequisites(&args, &manifest)? {
+        return crate::preflight::save_prerequisites(&args, &report);
+    }
     if !usage.is_clear() {
         return crate::preflight::save_blocked(&args, &usage, args.english);
     }
@@ -880,7 +944,10 @@ fn launch_installed_maintenance(args: &Args) -> Result<i32> {
     if detach {
         command
             .arg("--wait-for-pid")
-            .arg(std::process::id().to_string());
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
     }
     if args.english {
         command.arg("--english");
@@ -974,7 +1041,7 @@ fn registry_open_result(status: i32) -> Result<bool> {
     }
 }
 
-fn registry_key_exists(subkey: &str) -> Result<bool> {
+fn registry_key_exists(scope: avelin_core::InstallScope, subkey: &str) -> Result<bool> {
     use std::ffi::c_void;
     #[link(name = "advapi32")]
     unsafe extern "system" {
@@ -993,7 +1060,11 @@ fn registry_key_exists(subkey: &str) -> Result<bool> {
     // Match the worker's explicit 64-bit HKCU registry view.
     let status = unsafe {
         RegOpenKeyExW(
-            0x80000001u32 as i32 as isize as *mut c_void,
+            (if scope.is_current_user() {
+                0x80000001u32
+            } else {
+                0x80000002u32
+            }) as i32 as isize as *mut c_void,
             name.as_ptr(),
             0,
             0x0001 | 0x0100,
@@ -1044,25 +1115,29 @@ fn run(
     manifest: Manifest,
     hooks: Option<UiHooks>,
 ) -> Result<i32> {
-    let target = args.install_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-            .join(&manifest.directory_name)
-    });
+    let target = args
+        .install_dir
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| default_target(&manifest))?;
     install_root(&target)?;
+    avelin_core::scope::require_elevation(manifest.install_scope)?;
+    avelin_core::scope::validate_target(manifest.install_scope, &target)?;
     let user_sid = transport::current_user_sid()?;
     let mut product_lock = if args.operation == Operation::Recover {
         // Recovery validates the old task and claims the engine's product mutex.
         // Its new coordinator must not remove or overwrite the old task's lock.
         AppLock::acquire(
+            manifest.install_scope,
             &format!(
-                "{}-recovery-{}",
-                manifest.app_id,
+                "recovery-{}-{}",
+                &hash_bytes(manifest.app_id.as_bytes())[..16],
                 uuid::Uuid::new_v4().simple()
             ),
             &user_sid,
         )?
     } else {
-        AppLock::acquire(&manifest.app_id, &user_sid)?
+        AppLock::acquire(manifest.install_scope, &manifest.app_id, &user_sid)?
     };
     let registry_key = format!(
         r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Avelin.M0.{}",
@@ -1152,7 +1227,7 @@ fn run(
         Operation::Install => {
             resources::validate_selected_destination(&target, &selected_resources.files)?;
             ensure!(
-                !registry_key_exists(&registry_key)?,
+                !registry_key_exists(manifest.install_scope, &registry_key)?,
                 "this app already has an uninstall registration; use the explicit upgrade operation with a newer package"
             );
             None
@@ -1246,7 +1321,7 @@ fn run(
             "M0 path limit exceeded"
         );
     }
-    let execution_directory = session_root(&args)?;
+    let execution_directory = session_root(&args, manifest.install_scope)?;
     let locations = allocate_task_locations(
         uuid::Uuid::new_v4().to_string(),
         execution_directory.path().to_path_buf(),
@@ -1393,11 +1468,14 @@ fn run(
             args.operation.into(),
             task.clone(),
             target,
-            user_sid,
+            user_sid.clone(),
             selection.selected.clone(),
             selection.source,
         )?
     };
+    if manifest.install_scope == avelin_core::InstallScope::AllUsers {
+        plan.user_sid = user_sid.clone();
+    }
     plan.desktop_shortcut = desktop;
     plan.start_menu_shortcut = start_menu;
     plan.validate(&manifest)?;
@@ -1430,6 +1508,7 @@ fn run(
     let pipe = format!(r"\\.\pipe\avelin-m0-{}", uuid::Uuid::new_v4().simple());
     let candidate = session.join("receipt-candidate.json");
     let mut receipt = existing_receipt.unwrap_or_else(|| Receipt {
+        install_scope: manifest.install_scope,
         schema_version: if manifest.schema_version == 1 {
             SCHEMA_VERSION
         } else {
@@ -1463,6 +1542,7 @@ fn run(
     if args.operation == Operation::Repair {
         // Repaired shortcuts can have new bytes. Publish a new receipt commit
         // linked to the verified prior receipt instead of reusing its identity.
+        receipt.user_sid = plan.user_sid.clone();
         receipt.previous_commit_id = Some(receipt.commit_id.clone());
         receipt.commit_id = uuid::Uuid::new_v4().to_string();
         receipt.task_id = task.clone();
@@ -1616,6 +1696,7 @@ fn run(
         use avelin_core::session::{SessionRecord, running_process};
         let identity = SessionRecord {
             schema_version: 1,
+            install_scope: manifest.install_scope,
             task_id: task.clone(),
             app_id: manifest.app_id.clone(),
             operation: plan.operation.as_str().into(),
@@ -2167,7 +2248,7 @@ fn verify_result(
             "installed manifest does not describe the committed package"
         );
         crate::upgrade::verify_registration(
-            &crate::upgrade::registration(&manifest.app_id)?
+            &crate::upgrade::registration(manifest.install_scope, &manifest.app_id)?
                 .context("installed registration missing")?,
             manifest,
             target,
@@ -2188,7 +2269,7 @@ fn verify_result(
             resources::verify_removed_or_preserved(Path::new(&shortcut.path), &shortcut.sha256)?;
         }
         ensure!(
-            crate::upgrade::registration(&manifest.app_id)?.is_none(),
+            crate::upgrade::registration(manifest.install_scope, &manifest.app_id)?.is_none(),
             "uninstall registration remains"
         );
         crate::upgrade::ensure_no_pending(target)?;
@@ -2253,7 +2334,7 @@ fn verify_upgrade_result(
     }
     crate::upgrade::verify_removed(previous, &receipt.files, target)?;
     crate::upgrade::verify_registration(
-        &crate::upgrade::registration(&manifest.app_id)?
+        &crate::upgrade::registration(manifest.install_scope, &manifest.app_id)?
             .context("upgraded registration missing")?,
         manifest,
         target,
@@ -2378,6 +2459,9 @@ fn ui_options(args: &Args, m: Option<&Manifest>) -> avelin_ui::UiOptions {
         })
         .unwrap_or_default();
     avelin_ui::UiOptions {
+        install_scope: m.map(|m| m.install_scope).unwrap_or_default(),
+        allow_updates: matches!(args.operation, Operation::Repair | Operation::Modify)
+            && m.is_some_and(|m| m.updates.is_some()),
         components,
         maintenance_bytes: 0,
         allow_modify: matches!(args.operation, Operation::Repair | Operation::Modify)
@@ -2528,8 +2612,12 @@ fn merge_gui_shutdown(
 
 #[cfg(feature = "gui")]
 fn launch_installed(manifest: &Manifest, target: &Path, locations: &TaskLocations) -> Result<u32> {
+    ensure!(
+        manifest.install_scope.is_current_user(),
+        "Use the public shortcut to launch the all-users application without administrator privileges"
+    );
     let user_sid = transport::current_user_sid()?;
-    let _lock = AppLock::acquire(&manifest.app_id, &user_sid)?;
+    let _lock = AppLock::acquire(manifest.install_scope, &manifest.app_id, &user_sid)?;
     let entry = resources::verified_entry(manifest, target, &user_sid, &locations.task_id)?;
     let entry_hash = entry.sha256()?;
     let directory = PinnedDirectory::open(&locations.session_dir)?;
@@ -2593,6 +2681,9 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
         let mut started_target = None;
         let mut launch_pending = false;
         let mut launched = false;
+        let mut update_release = None;
+        let mut update_launched = false;
+        let mut update_handoff = None;
         while !dispatcher_shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             if worker.as_ref().is_some_and(|worker| worker.is_finished()) {
                 task_code = worker.take().map(|worker| worker.join().unwrap_or(4));
@@ -2637,6 +2728,108 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                 break;
             }
             match cmd {
+                UiCommand::CheckForUpdates
+                    if !started
+                        && !update_launched
+                        && matches!(args.operation, Operation::Repair | Operation::Modify) =>
+                {
+                    let result = manifest
+                        .updates
+                        .as_ref()
+                        .context("no update feed configured")
+                        .and_then(|config| {
+                            avelin_core::updates::check_cancel(
+                                config,
+                                &manifest.app_id,
+                                &manifest.app_version,
+                                &dispatcher_shutdown,
+                            )
+                        });
+                    let detail = match result {
+                        Ok(release) => {
+                            update_release = release;
+                            match &update_release {
+                                Some(release) => {
+                                    if args.english {
+                                        format!(
+                                            "Version {} is available. Download it to open the upgrade confirmation.",
+                                            release.version
+                                        )
+                                    } else {
+                                        format!(
+                                            "发现新版本 {}。下载后将打开升级确认窗口。",
+                                            release.version
+                                        )
+                                    }
+                                }
+                                None => {
+                                    if args.english {
+                                        "You are using the latest version.".into()
+                                    } else {
+                                        "当前已是最新版本。".into()
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            update_release = None;
+                            crate::online_update::failure_message(
+                                &error,
+                                crate::online_update::FailureStage::Check,
+                                args.english,
+                            )
+                        }
+                    };
+                    let _ = response_sender.send(TaskResponse::UpdateStatus {
+                        available_version: update_release.as_ref().map(|r| r.version.clone()),
+                        detail,
+                        launched: false,
+                    });
+                }
+                UiCommand::DownloadUpdate
+                    if !started
+                        && !update_launched
+                        && matches!(args.operation, Operation::Repair | Operation::Modify) =>
+                {
+                    let result = update_release
+                        .as_ref()
+                        .context("check for a newer update first")
+                        .and_then(|release| {
+                            crate::online_update::download_and_launch(
+                                &manifest,
+                                args.install_dir
+                                    .as_deref()
+                                    .context("installed directory unavailable")?,
+                                release,
+                                args.english,
+                                &dispatcher_shutdown,
+                            )
+                        });
+                    let detail = match result {
+                        Ok(handoff) => {
+                            let pid = handoff.pid();
+                            update_handoff = Some(handoff);
+                            update_launched = true;
+                            if args.english {
+                                format!(
+                                    "Upgrade confirmation opened (PID {pid}). You can close this window."
+                                )
+                            } else {
+                                format!("已打开升级确认窗口（PID {pid}），可以关闭当前窗口。")
+                            }
+                        }
+                        Err(error) => crate::online_update::failure_message(
+                            &error,
+                            crate::online_update::FailureStage::Download,
+                            args.english,
+                        ),
+                    };
+                    let _ = response_sender.send(TaskResponse::UpdateStatus {
+                        available_version: update_release.as_ref().map(|r| r.version.clone()),
+                        detail,
+                        launched: update_launched,
+                    });
+                }
                 UiCommand::Cancel => {
                     if args.operation == Operation::Install {
                         dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2677,7 +2870,7 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                     selected_components,
                     operation,
                     migration_confirmed,
-                } if !started => {
+                } if !started && !update_launched => {
                     started = true;
                     let requested_operation = match operation.unwrap_or(args.operation.into()) {
                         avelin_core::Operation::Install => Operation::Install,
@@ -2743,6 +2936,23 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
                         // This command arrives only after the recovery page's
                         // explicit confirmation. Silent checks never take it.
                         args.recovery_apply = true;
+                    }
+                    match crate::preflight::prerequisites(&args, &manifest) {
+                        Ok(Some(report)) => {
+                            started = false;
+                            let _ = response_sender.send(TaskResponse::PreflightBlocked {
+                                detail: report.blocking_detail(args.english),
+                            });
+                            continue;
+                        }
+                        Err(error) => {
+                            started = false;
+                            let _ = response_sender.send(TaskResponse::PreflightBlocked {
+                                detail: format!("AVELIN_PREREQUISITES_CHECK_FAILED\n{error:#}"),
+                            });
+                            continue;
+                        }
+                        Ok(None) => {}
                     }
                     // No worker, task journal or target mutation exists at this point.
                     // Only this pre-start response may return the UI to confirmation.
@@ -2884,6 +3094,11 @@ fn run_gui(mut args: Args, backend: Arc<PinnedFile>, manifest: Manifest) -> Resu
         }
         dispatcher_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         dispatcher_shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handoff) = update_handoff {
+            // The old window is closed; retain download pins until the new
+            // Setup exits, without terminating or controlling that process.
+            return Some(handoff.wait());
+        }
         // Worker observation is bounded; the worker must publish its report and drop
         // its guard before main may exit. Blocking local disk I/O is not preempted.
         worker
@@ -3125,15 +3340,15 @@ mod tests {
         for status in [5, 87, 1018] {
             assert!(registry_open_result(status).is_err());
         }
-        assert!(registry_key_exists("bad\0path").is_err());
+        assert!(registry_key_exists(avelin_core::InstallScope::CurrentUser, "bad\0path").is_err());
         assert!(
-            !registry_key_exists(&format!(
-                "Software\\Avelin\\Absent-{}",
-                uuid::Uuid::new_v4().simple()
-            ))
+            !registry_key_exists(
+                avelin_core::InstallScope::CurrentUser,
+                &format!("Software\\Avelin\\Absent-{}", uuid::Uuid::new_v4().simple())
+            )
             .unwrap()
         );
-        assert!(registry_key_exists("Software").unwrap());
+        assert!(registry_key_exists(avelin_core::InstallScope::CurrentUser, "Software").unwrap());
     }
 
     #[test]
@@ -3147,6 +3362,7 @@ mod tests {
         let other =
             execution_files::create_file(&directory, "other.exe", b"inert test bytes").unwrap();
         let mut receipt = Receipt {
+            install_scope: Default::default(),
             selected_components: vec![],
             schema_version: SCHEMA_VERSION,
             app_id: "dev.avelin.component-test".into(),

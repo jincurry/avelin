@@ -19,12 +19,17 @@ function Check([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 function Project([string]$Name, $ComponentEvidence, [switch]$Absent, [switch]$Failed,
-    [ValidateSet('optional-components', 'windows-maintenance')][string]$EvidenceDirectory = 'optional-components') {
+    [ValidateSet('optional-components', 'windows-maintenance', 'windows-features', 'all-users')][string]$EvidenceDirectory = 'optional-components') {
     $run = Join-Path $testRoot $Name
     $null = [IO.Directory]::CreateDirectory($run)
     $commandStatus = if ($Failed) { 'FAILED' } else { 'EXITED_ZERO' }
     $status = if ($Failed) { 'FAILED' } else { 'PASSED' }
-    $commandName = if ($EvidenceDirectory -ceq 'windows-maintenance') { 'windows-maintenance' } else { 'rust-optional-components' }
+    $commandName = switch ($EvidenceDirectory) {
+        'windows-maintenance' { 'windows-maintenance' }
+        'windows-features' { 'windows-features' }
+        'all-users' { 'rust-all-users' }
+        default { 'rust-optional-components' }
+    }
     SaveJson (Join-Path $run 'summary.json') @{
         status = $status
         commands = @(@{ name = $commandName; status = $commandStatus; arguments = $privateMarker },
@@ -99,5 +104,27 @@ Check ($windowsFailed.status -ceq 'FAILED') 'Windows maintenance rows must not t
 Check ($windowsFailed.windows_maintenance_case_count -eq 2) 'Failed run must retain its completed Windows maintenance case count'
 Check ($windowsFailed.failed_command -ceq 'windows-maintenance') 'Failed Windows maintenance command is not identified'
 Check ($windowsFailed.failure_category -ceq 'command_failed') 'Failed Windows maintenance command category changed'
+$caseCount++
+$featuresMixed = Project 'features-mixed-evidence' $windowsEvidence -EvidenceDirectory 'windows-features'
+Check ($featuresMixed.windows_feature_case_count -eq 2) 'Feature summary must count only exact PASSED rows'
+Check ($featuresMixed.windows_feature_status -ceq 'PASSED') 'Feature stage status is absent'
+Check ($featuresMixed.last_command -ceq 'windows-features') 'Feature command is not recognized'
+Check ($featuresMixed.all_users_case_count -eq 0 -and $null -eq $featuresMixed.all_users_status) 'Missing machine evidence must not be interpreted as acceptance'
+$caseCount++
+$machineMissing = Project 'machine-needs-elevation' @{status='NeedsElevation';cases=@(@{label=$privateMarker;status='PASSED'})} -EvidenceDirectory 'all-users'
+Check ($machineMissing.all_users_status -ceq 'NeedsElevation') 'Missing elevation status must be preserved'
+Check ($machineMissing.all_users_case_count -eq 0) 'NeedsElevation must never count machine cases as passed'
+$caseCount++
+$machineMixed = Project 'machine-mixed-evidence' $windowsEvidence -EvidenceDirectory 'all-users'
+Check ($machineMixed.all_users_case_count -eq 2) 'Machine summary must count only exact PASSED rows'
+Check ($machineMixed.all_users_status -ceq 'PASSED') 'Machine stage status is absent'
+Check ($machineMixed.last_command -ceq 'rust-all-users') 'Machine CI command is not recognized'
+$caseCount++
+$denialSkipped = Project 'feature-needs-non-elevated' @{status='PASSED';cases=@(@{label='all-users-silent-refuses-without-elevation';status='NeedsNonElevated';detail=$privateMarker})} -EvidenceDirectory 'windows-features'
+Check ($denialSkipped.non_elevated_rejection_status -ceq 'NeedsNonElevated') 'Elevated token must not invent non-elevated refusal evidence'
+Check ($denialSkipped.windows_feature_case_count -eq 0) 'Skipped non-elevated case must not count as passed'
+$caseCount++
+$machineFailed = Project 'machine-failed-run' $windowsEvidence -Failed -EvidenceDirectory 'all-users'
+Check ($machineFailed.status -ceq 'FAILED' -and $machineFailed.failed_command -ceq 'rust-all-users') 'Machine failure must remain visible'
 $caseCount++
 [ordered]@{ status='PASSED'; projection_cases=$caseCount; evidence=$testRoot } | ConvertTo-Json

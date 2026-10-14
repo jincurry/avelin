@@ -142,6 +142,9 @@ pub(crate) fn verify_result(
     user_sid: &str,
     session: &Path,
 ) -> Result<ModifyReport> {
+    avelin_core::scope::validate_session(manifest.install_scope, session)?;
+    avelin_core::scope::require_elevation(manifest.install_scope)?;
+    avelin_core::scope::validate_target(manifest.install_scope, target)?;
     let plan: InstallPlan = serde_json::from_slice(&read(&session.join("install-plan.json"))?)?;
     let previous_bytes = read(&session.join("previous-receipt.json"))?;
     let previous: Receipt = serde_json::from_slice(&previous_bytes)?;

@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use avelin_core::{
-    InstallPlan, Manifest, Operation, RECEIPT_NAME, Receipt, hash_bytes,
+    InstallPlan, InstallScope, Manifest, Operation, RECEIPT_NAME, Receipt, hash_bytes,
     session::{SessionRecord, running_process},
 };
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,12 @@ unsafe extern "system" {
         required: *mut u32,
     ) -> i32;
     fn ConvertSidToStringSidW(sid: *const c_void, text: *mut *mut u16) -> i32;
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut *mut c_void,
+        size: *mut u32,
+    ) -> i32;
 }
 pub(crate) fn current_user_sid() -> Result<String> {
     unsafe {
@@ -86,13 +92,60 @@ pub(crate) fn current_user_sid() -> Result<String> {
 /// Every native transaction and recovery uses the same per-user product mutex.
 pub(crate) struct ProductLock(Handle);
 impl ProductLock {
-    pub(crate) fn acquire(product: &str, sid: &str) -> Result<Self> {
-        let key = hash_bytes(format!("{sid}\n{product}").as_bytes());
+    pub(crate) fn acquire(scope: InstallScope, product: &str, sid: &str) -> Result<Self> {
+        avelin_core::scope::require_elevation(scope)?;
+        let owner = if scope == InstallScope::AllUsers {
+            "machine"
+        } else {
+            sid
+        };
+        let key = hash_bytes(format!("{owner}\n{product}").as_bytes());
         let name: Vec<u16> = format!("Global\\Avelin-Rust-{key}")
             .encode_utf16()
             .chain(Some(0))
             .collect();
-        let handle = unsafe { CreateMutexW(ptr::null(), 0, name.as_ptr()) };
+        // Machine transactions share one mutex across elevated administrator accounts.
+        // Its ACL is independent of whichever administrator created it first.
+        #[repr(C)]
+        struct Attributes {
+            length: u32,
+            descriptor: *mut c_void,
+            inherit: i32,
+        }
+        let mut descriptor = ptr::null_mut();
+        if scope == InstallScope::AllUsers {
+            let security: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            ensure!(
+                unsafe {
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        security.as_ptr(),
+                        1,
+                        &mut descriptor,
+                        ptr::null_mut(),
+                    )
+                } != 0,
+                "cannot build machine mutex security"
+            );
+        }
+        let attributes = Attributes {
+            length: std::mem::size_of::<Attributes>() as u32,
+            descriptor,
+            inherit: 0,
+        };
+        let pointer = if descriptor.is_null() {
+            ptr::null()
+        } else {
+            (&attributes as *const Attributes).cast()
+        };
+        let handle = unsafe { CreateMutexW(pointer, 0, name.as_ptr()) };
+        if !descriptor.is_null() {
+            unsafe {
+                LocalFree(descriptor);
+            }
+        }
         ensure!(!handle.is_null(), "cannot acquire native product mutex");
         let status = unsafe { WaitForSingleObject(handle, 0) };
         if !matches!(status, 0 | 0x80) {
@@ -329,7 +382,11 @@ fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Pa
         avelin_core::ShortcutKind::Desktop,
         avelin_core::ShortcutKind::StartMenu,
     ] {
-        allowed.insert(key(&system::shortcut_path(&manifest.app_id, kind)?));
+        allowed.insert(key(&system::shortcut_path(
+            manifest.install_scope,
+            &manifest.app_id,
+            kind,
+        )?));
     }
     let check = |resource: &Resource| -> Result<()> {
         ensure!(
@@ -406,7 +463,11 @@ fn validate_resources(record: &RecoveryRecord, manifest: &Manifest, session: &Pa
                 ensure!(
                     kinds.insert(shortcut.kind)
                         && key(Path::new(&shortcut.path))
-                            == key(&system::shortcut_path(&manifest.app_id, shortcut.kind)?)
+                            == key(&system::shortcut_path(
+                                manifest.install_scope,
+                                &manifest.app_id,
+                                shortcut.kind
+                            )?)
                         && key(Path::new(&shortcut.target)) == key(&root.join(&manifest.entry)),
                     "recovery receipt shortcut ownership differs"
                 );
@@ -508,6 +569,9 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
     );
     request.manifest.validate()?;
     avelin_core::install_root(request.target)?;
+    avelin_core::scope::require_elevation(request.manifest.install_scope)?;
+    avelin_core::scope::validate_target(request.manifest.install_scope, request.target)?;
+    avelin_core::scope::validate_session(request.manifest.install_scope, request.session)?;
     ensure!(
         request.session.is_absolute()
             && !inside(request.session, request.target)
@@ -544,7 +608,7 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
         "recovery receipt differs from the frozen component selection"
     );
     ensure!(
-        record.plan.user_sid == request.user_sid
+        record.plan.install_scope == request.manifest.install_scope
             && key(&record.plan.install_dir) == key(request.target)
             && !matches!(record.plan.operation, Operation::Recover),
         "recovery identity mismatch"
@@ -553,10 +617,22 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
         record.receipt.app_id == request.manifest.app_id
             && record.receipt.app_version == request.manifest.app_version
             && record.receipt.manifest_sha256 == record.plan.manifest_sha256
-            && record.receipt.user_sid == request.user_sid
+            && record.receipt.install_scope == record.plan.install_scope
             && key(Path::new(&record.receipt.install_dir)) == key(request.target),
         "recovery receipt identity mismatch"
     );
+    avelin_core::scope::validate_owned_installation(
+        request.manifest.install_scope,
+        request.target,
+        &record.plan.user_sid,
+        request.user_sid,
+    )?;
+    avelin_core::scope::validate_owned_installation(
+        request.manifest.install_scope,
+        request.target,
+        &record.receipt.user_sid,
+        request.user_sid,
+    )?;
     for id in [
         &record.receipt.installation_id,
         &record.receipt.task_id,
@@ -704,6 +780,7 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
     let session: SessionRecord = serde_json::from_slice(&session_bytes)?;
     ensure!(
         session.schema_version == 1
+            && session.install_scope == record.plan.install_scope
             && session.task_id == record.plan.task_id
             && session.app_id == record.plan.app_id
             && session.operation == record.plan.operation.as_str()
@@ -713,16 +790,14 @@ fn load(request: &RecoveryRequest<'_>) -> Result<Loaded> {
     );
     dead(&session.backend)?;
     dead(&session.coordinator)?;
-    let local =
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?);
-    let expected_lock = local.join("Avelin/M0/locks").join(format!(
-        "{}-{}.lock",
-        request.manifest.app_id,
-        &hash_bytes(request.user_sid.as_bytes())[..16]
-    ));
+    let expected_lock = avelin_core::scope::product_lock_path(
+        request.manifest.install_scope,
+        &request.manifest.app_id,
+        &record.plan.user_sid,
+    )?;
     ensure!(
         key(&session.product_lock) == key(&expected_lock),
-        "retained lock path is not this user's product lock"
+        "retained lock path is outside this installation scope"
     );
     if session.product_lock.try_exists()? {
         confirm(
@@ -841,7 +916,10 @@ fn registry_current_allowed(
     loaded: &Loaded,
     session: &Path,
 ) -> Result<system::RegistrationSnapshot> {
-    let current = system::registration_snapshot(&loaded.record.plan.app_id)?;
+    let current = system::registration_snapshot(
+        loaded.record.plan.install_scope,
+        &loaded.record.plan.app_id,
+    )?;
     if loaded.committed {
         ensure!(
             current == loaded.record.next_registration,
@@ -1050,7 +1128,11 @@ fn report(loaded: &Loaded, apply: bool) -> RecoveryReport {
     }
 }
 pub(crate) fn inspect(request: &RecoveryRequest<'_>) -> Result<RecoveryReport> {
-    let _lock = ProductLock::acquire(&request.manifest.app_id, request.user_sid)?;
+    let _lock = ProductLock::acquire(
+        request.manifest.install_scope,
+        &request.manifest.app_id,
+        request.user_sid,
+    )?;
     let loaded = load(request)?;
     registry_current_allowed(&loaded, request.session)?;
     Ok(report(&loaded, false))
@@ -1060,7 +1142,11 @@ pub(crate) fn recover(
     observer: &mut impl EngineObserver,
     pause: Option<(&Path, &str, &str)>,
 ) -> Result<RecoveryReport> {
-    let _lock = ProductLock::acquire(&request.manifest.app_id, request.user_sid)?;
+    let _lock = ProductLock::acquire(
+        request.manifest.install_scope,
+        &request.manifest.app_id,
+        request.user_sid,
+    )?;
     let loaded = load(&request)?;
     let current_registry = registry_current_allowed(&loaded, request.session)?;
     if !request.apply {
@@ -1128,7 +1214,8 @@ pub(crate) fn recover(
             if item.resource.path.try_exists()? {
                 confirm(&item.resource.path, &item.resource.sha256)?;
             } else {
-                owned::publish(
+                owned::publish_managed(
+                    loaded.record.plan.install_scope,
                     text(&item.source)?,
                     text(&item.resource.path)?,
                     &item.resource.sha256,
@@ -1137,6 +1224,7 @@ pub(crate) fn recover(
             }
         }
         system::restore_registration_snapshot(
+            loaded.record.plan.install_scope,
             &loaded.record.plan.app_id,
             &current_registry,
             &loaded.record.registration,
@@ -1161,7 +1249,10 @@ pub(crate) fn recover(
         &loaded.record.registration
     };
     ensure!(
-        system::registration_snapshot(&loaded.record.plan.app_id)? == *expected,
+        system::registration_snapshot(
+            loaded.record.plan.install_scope,
+            &loaded.record.plan.app_id
+        )? == *expected,
         "registration recovery verification failed"
     );
     let done = request.session.join("recovery-complete.json");
@@ -1284,14 +1375,15 @@ mod tests {
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
         let (peer_id, peer_sid) = (id.clone(), sid.clone());
         let peer = std::thread::spawn(move || {
-            let _guard = ProductLock::acquire(&peer_id, &peer_sid).unwrap();
+            let _guard =
+                ProductLock::acquire(InstallScope::CurrentUser, &peer_id, &peer_sid).unwrap();
             ready_tx.send(()).unwrap();
             stop_rx.recv().unwrap();
         });
         ready_rx.recv().unwrap();
-        assert!(ProductLock::acquire(&id, &sid).is_err());
+        assert!(ProductLock::acquire(InstallScope::CurrentUser, &id, &sid).is_err());
         stop_tx.send(()).unwrap();
         peer.join().unwrap();
-        assert!(ProductLock::acquire(&id, &sid).is_ok());
+        assert!(ProductLock::acquire(InstallScope::CurrentUser, &id, &sid).is_ok());
     }
 }

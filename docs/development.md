@@ -211,7 +211,17 @@ pwsh -NoProfile -File scripts/ci-rust-windows.ps1 `
 
 输出必须是本仓库 `target/` 下的新目录。`-CargoTargetDirectory target` 显式复用 Cargo 缓存，仍执行构建并记录组件摘要；省略时使用本次运行独立目录。Python 可通过 `-PythonPath` 指定。
 
-真实进程脚本会创建唯一测试产品的文件、快捷方式和当前用户卸载登记。维护脚本只恢复其明确创建并核验的测试任务；其余中断与无法确认恢复的场景保留现场及相关登记，供核对日志和资源。它们不打开 GUI，不改变缩放，不执行性能或签名测试。
+完整 CI 的离线 schema 检查还需要固定的 Python 依赖；CI 脚本本身不安装工具或库。在调用前准备隔离目录并设置 `PYTHONPATH`，workflow 已执行同一步骤：
+
+```powershell
+python -m pip install --no-deps --only-binary=:all: --target .\target\schema-tools -r .\tests\harness\schema-requirements.txt
+$env:PYTHONPATH = Join-Path $PWD 'target/schema-tools'
+python tests/harness/check-windows-feature-schemas.py
+```
+
+新结构检查覆盖范围、运行库、更新 feed 与维护命令；在线模块测试使用可控响应检查重定向、大小、摘要、包身份、取消及原子输出，并在本地启动临时自签 TLS 服务确认 Windows 拒绝不受信任证书。测试不更改宿主根证书、不执行下载的测试 EXE。机器级流程需要提升的终端，创建的测试产品使用独立 ID 和受控 Program Files 目录；未提升时报告未执行，不算通过。
+
+真实进程脚本会创建唯一测试产品的文件、快捷方式和卸载登记。当前用户场景使用 HKCU 和个人快捷方式；提升后的全用户场景另使用受控 Program Files 目录、HKLM 和公共快捷方式。维护脚本只恢复其明确创建并核验的测试任务；其余中断与无法确认恢复的场景保留现场及相关登记，供核对日志和资源。它们不打开 GUI，不改变缩放，不执行性能或签名测试。全用户真实流程的当前验收边界见[Windows 部署指南](windows-deployment.md#3-全用户安装与提权)。
 
 `.github/workflows/rust-windows.yml` 使用 GitHub 托管的 `windows-2025`，准备 stable MSVC x64 工具链后调用同一入口。`.github/workflows/windows.yml` 是手动自托管 Rust 验收入口，需要预先配置 `avelin-tools` runner、其当前明确校验的 Rust `1.97.1` 和可选 `AVELIN_PYTHON`。完整日志和测试现场不自动上传；实际云端结果以对应提交的执行状态为准。
 

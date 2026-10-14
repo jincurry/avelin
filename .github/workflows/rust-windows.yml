@@ -42,6 +42,17 @@ jobs:
           persist-credentials: false
       - name: Check public source contents
         run: python scripts/check-public-source.py
+      - name: Prepare validated Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.14.7'
+          architecture: x64
+      - name: Prepare isolated schema validation dependencies
+        run: |
+          $schemaTools = Join-Path $env:GITHUB_WORKSPACE 'target/schema-tools'
+          python -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --target $schemaTools -r tests/harness/schema-requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "PYTHONPATH=$schemaTools" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Prepare stable MSVC toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component rust-docs
@@ -53,7 +64,7 @@ jobs:
           # complete locked graph before entering its offline-only phase.
           cargo +stable fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build Rust kit and validate lifecycle and Windows maintenance cases
+      - name: Build Rust kit and validate lifecycle and Windows feature cases
         run: |
           $runDirectory = "target/rust-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $privateDirectory = Join-Path $env:GITHUB_WORKSPACE 'target/rust-ci-private'
@@ -73,7 +84,7 @@ jobs:
           "AVELIN_RUST_CI_EXIT=$validationExitCode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AVELIN_RUST_CI_REPORT=$runDirectory/summary.json" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if ($validationExitCode -eq 0) {
-            Write-Output 'Rust build, packaging, lifecycle, interruption, maintenance, optional component and Windows maintenance entry cases passed.'
+            Write-Output 'Rust validation completed. See the public summary for runtime, update, and machine-scope acceptance statuses, including any permission-dependent cases not run.'
           } else {
             Write-Output "Rust preview validation failed (exit code $validationExitCode). See the public summary for the failing command."
           }
@@ -88,7 +99,7 @@ jobs:
             -OutputPath target/rust-ci-public/summary.json -Commit '${{ github.sha }}' `
             -ValidationExitCode $exitCode | ConvertFrom-Json
           $public | ConvertTo-Json -Depth 12 | Write-Output
-          "## Rust validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count); maintenance cases: $($public.maintenance_case_count); optional component cases: $($public.optional_component_case_count); Windows maintenance entry cases: $($public.windows_maintenance_case_count)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "## Rust validation`n`nStatus: $($public.status)`n`nLifecycle cases: $($public.lifecycle_case_count); interruption cases: $($public.interruption_case_count); maintenance cases: $($public.maintenance_case_count); optional component cases: $($public.optional_component_case_count); Windows maintenance entry cases: $($public.windows_maintenance_case_count).`n`nWindows features: $($public.windows_feature_status), $($public.windows_feature_case_count) cases. Non-elevated refusal: $($public.non_elevated_rejection_status).`n`nAll-users acceptance: $($public.all_users_status), $($public.all_users_case_count) cases." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
       - name: Preserve public validation summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

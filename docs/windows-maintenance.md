@@ -20,7 +20,7 @@
 
 ### 不需要重新寻找原始 Setup
 
-安装目录的 `uninstall.exe` 保留完整离线载荷。维护启动器先核对 manifest、receipt、当前用户、完整载荷摘要和 runtime 摘要，再把经过验证的 runtime、worker 与 manifest 复制到新的私有临时目录，由副本执行维护。它不在安装目录内执行部署，避免自己占用即将替换的文件。
+安装目录的 `uninstall.exe` 保留完整离线载荷。维护启动器先核对 manifest、receipt、原安装范围及用户/机器归属、完整载荷摘要和 runtime 摘要，再把经过验证的 runtime、worker 与 manifest 复制到新的私有临时目录，由副本执行维护。它不在安装目录内执行部署，避免自己占用即将替换的文件。全用户维护需要管理员权限，见[Windows 部署指南](windows-deployment.md)。
 
 这不替代归属验证。内部 runtime、manifest 或离线载荷缺失/变化时，入口会拒绝；此时使用相同构建的原始 Setup。receipt 缺失或损坏时，不能仅凭应用名称或路径接管目录。原始 Setup 仍建议保留，具体资源保护规则见[恢复与修复](maintenance.md)。
 
@@ -65,4 +65,4 @@
 
 系统入口命令、私有副本、摘要验证、新旧登记/回滚、真实文件占用与释放后重试应分别由源码和真实进程检查确认。headless UI 测试验证交互状态，不能代替 Windows 应用列表、原生窗口或讲述人的人工验收。测试范围见[开发指南](development.md)。
 
-微软的 [卸载登记说明](https://learn.microsoft.com/en-us/windows/win32/msi/uninstall-registry-key)列出 `ModifyPath`；[ARPNOMODIFY 说明](https://learn.microsoft.com/en-us/windows/win32/msi/arpnomodify)说明 `NoModify` 与系统更改入口的关系。Avelin 使用当前用户的 Win32 登记，修复由自己的维护页提供，保留 `NoRepair = 1`。
+微软的 [卸载登记说明](https://learn.microsoft.com/en-us/windows/win32/msi/uninstall-registry-key)列出 `ModifyPath`；[ARPNOMODIFY 说明](https://learn.microsoft.com/en-us/windows/win32/msi/arpnomodify)说明 `NoModify` 与系统更改入口的关系。Avelin 根据包内范围使用 HKCU 或 HKLM 的 Win32 登记，修复由自己的维护页提供，保留 `NoRepair = 1`。

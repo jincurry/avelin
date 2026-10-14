@@ -51,7 +51,7 @@ pwsh -NoProfile -File scripts/Verify-RustDevKit.ps1 `
 
 ### 完整验收入口
 
-使用 `scripts/ci-rust-windows.ps1`，见[开发指南](development.md#维护者完整工具包验收)。Rust 入口从源码测试与构建开始，采集依赖材料、打包并解压校验，再使用解压组件运行 17 项生命周期、6 项中断及 17 项恢复/修复验收。
+使用 `scripts/ci-rust-windows.ps1`，见[开发指南](development.md#维护者完整工具包验收)。Rust 入口从源码测试与构建开始，采集依赖材料、打包并解压校验，再使用解压组件运行生命周期、中断、恢复/修复、可选组件、Windows 维护与部署配置验收。全用户真实流程需要提升权限，未执行或受阻须单独记录；构包成功不代表这些流程通过。
 
 `.github/workflows/rust-windows.yml` 提供 GitHub 托管 Windows 入口；`.github/workflows/windows.yml` 保留手动自托管入口。完整本机日志可能包含路径、SID 和测试资源，不作为公开附件自动上传；云端执行结果以对应源码提交的实际运行状态为准。自托管 runner 的完整证据需在后续 checkout 清理工作目录前自行归档。
 

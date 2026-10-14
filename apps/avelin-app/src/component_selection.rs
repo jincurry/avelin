@@ -45,6 +45,10 @@ pub fn resolve(
         } else {
             manifest.clone()
         };
+        ensure!(
+            old.install_scope == manifest.install_scope,
+            "component maintenance cannot change installation scope"
+        );
         let (receipt, hash): (Receipt, _) = resources::read_receipt_with_hash(&old, target, sid)?;
         context.installed = receipt.selection(&old)?;
         context.receipt_sha256 = Some(hash);

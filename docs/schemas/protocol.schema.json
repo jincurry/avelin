@@ -132,6 +132,30 @@
               "const": "launch_installed"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "const": "check_for_updates"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "const": "download_update"
+            }
+          }
         }
       ]
     },
@@ -281,20 +305,63 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["response", "succeeded", "detail"],
+          "required": [
+            "response",
+            "succeeded",
+            "detail"
+          ],
           "properties": {
-            "response": { "const": "launch_result" },
-            "succeeded": { "type": "boolean" },
-            "detail": { "type": "string" }
+            "response": {
+              "const": "launch_result"
+            },
+            "succeeded": {
+              "type": "boolean"
+            },
+            "detail": {
+              "type": "string"
+            }
           }
         },
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["response", "detail"],
+          "required": [
+            "response",
+            "detail"
+          ],
           "properties": {
-            "response": { "const": "preflight_blocked" },
-            "detail": { "type": "string" }
+            "response": {
+              "const": "preflight_blocked"
+            },
+            "detail": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "response",
+            "detail",
+            "launched"
+          ],
+          "properties": {
+            "response": {
+              "const": "update_status"
+            },
+            "available_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "detail": {
+              "type": "string"
+            },
+            "launched": {
+              "type": "boolean"
+            }
           }
         }
       ]

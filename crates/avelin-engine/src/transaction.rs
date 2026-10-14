@@ -140,10 +140,16 @@ fn validate_receipt(
         receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
-            && receipt.user_sid == request.plan.user_sid
+            && receipt.install_scope == request.plan.install_scope
             && key(Path::new(&receipt.install_dir)) == key(&request.plan.install_dir),
         "receipt does not match the current user, product, manifest and destination"
     );
+    avelin_core::scope::validate_owned_installation(
+        manifest.install_scope,
+        &request.plan.install_dir,
+        &receipt.user_sid,
+        &request.plan.user_sid,
+    )?;
     avelin_core::safe_id(&receipt.installation_id)?;
     avelin_core::safe_id(&receipt.task_id)?;
     avelin_core::safe_id(&receipt.commit_id)?;
@@ -185,7 +191,7 @@ fn allowed_old(
     }
     let mut seen = BTreeSet::new();
     for shortcut in &receipt.shortcuts {
-        let path = system::shortcut_path(&manifest.app_id, shortcut.kind)?;
+        let path = system::shortcut_path(manifest.install_scope, &manifest.app_id, shortcut.kind)?;
         ensure!(
             seen.insert(shortcut.kind)
                 && key(&path) == key(Path::new(&shortcut.path))
@@ -204,6 +210,17 @@ fn allowed_old(
 fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
     let plan = request.plan;
     plan.validate(request.manifest)?;
+    avelin_core::scope::require_elevation(plan.install_scope)?;
+    avelin_core::scope::validate_target(plan.install_scope, &plan.install_dir)?;
+    avelin_core::scope::validate_session(plan.install_scope, request.session_dir)?;
+    if plan.install_scope == avelin_core::InstallScope::AllUsers
+        && plan.operation == Operation::Install
+    {
+        ensure!(
+            !plan.install_dir.try_exists()?,
+            "fresh all-users installation requires a new Program Files directory"
+        );
+    }
     validate_receipt(request.receipt, request.manifest, request)?;
     ensure!(
         request.receipt.selection(request.manifest)?
@@ -257,6 +274,10 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
     }
     if plan.operation != Operation::Uninstall {
         ensure!(
+            request.receipt.user_sid == plan.user_sid,
+            "new receipt must identify the executing user"
+        );
+        ensure!(
             request.receipt.task_id == plan.task_id && request.receipt.uninstaller_sha256.is_none(),
             "invalid new receipt candidate"
         );
@@ -285,10 +306,14 @@ fn validate_request(request: &EngineRequest<'_>) -> Result<()> {
         ensure!(
             seen.insert(shortcut.kind)
                 && key(Path::new(&shortcut.path))
-                    == key(&system::shortcut_path(&plan.app_id, shortcut.kind)?)
+                    == key(&system::shortcut_path(
+                        plan.install_scope,
+                        &plan.app_id,
+                        shortcut.kind
+                    )?)
                 && key(Path::new(&shortcut.target))
                     == key(&plan.install_dir.join(&request.manifest.entry)),
-            "shortcut is outside its current-user destination"
+            "shortcut is outside its scoped destination"
         );
     }
     ensure!(
@@ -412,7 +437,7 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                     "shortcut already exists"
                 );
             }
-            system::verify_registration(&request.plan.app_id, None)?;
+            system::verify_registration(request.plan.install_scope, &request.plan.app_id, None)?;
             None
         }
         Operation::Upgrade => {
@@ -449,7 +474,11 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
                 inventory.registration == expected,
                 "upgrade registration snapshot mismatch"
             );
-            system::verify_registration(&request.plan.app_id, Some(&expected))?;
+            system::verify_registration(
+                request.plan.install_scope,
+                &request.plan.app_id,
+                Some(&expected),
+            )?;
             let mut included = BTreeSet::new();
             for item in &inventory.backup {
                 ensure!(
@@ -615,7 +644,11 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             );
             let expected = system::registration_for_product(request.manifest, root)?
                 .context("component change registration is missing")?;
-            system::verify_registration(&request.plan.app_id, Some(&expected))?;
+            system::verify_registration(
+                request.plan.install_scope,
+                &request.plan.app_id,
+                Some(&expected),
+            )?;
             modify_snapshot = Some(snapshot);
             Some(expected)
         }
@@ -670,7 +703,11 @@ fn prepare(request: &EngineRequest<'_>, observer: &mut impl EngineObserver) -> R
             }
             let expected = system::registration_for_product(request.manifest, root)?
                 .context("uninstall registration is missing")?;
-            system::verify_registration(&request.plan.app_id, Some(&expected))?;
+            system::verify_registration(
+                request.plan.install_scope,
+                &request.plan.app_id,
+                Some(&expected),
+            )?;
             Some(expected)
         }
         Operation::Repair => {
@@ -966,6 +1003,11 @@ impl Transaction<'_> {
             .record("directory_intent", path, "", "create")?;
         owned::create_directory(text(path)?)?;
         self.directories.push(path.into());
+        if self.request.plan.install_scope == avelin_core::InstallScope::AllUsers
+            && key(path) == key(&self.request.plan.install_dir)
+        {
+            avelin_core::scope::ensure_machine_target(path)?;
+        }
         self.journal.record(
             "directory_created",
             path,
@@ -1128,7 +1170,8 @@ impl Transaction<'_> {
                 &item.resource.sha256,
                 "create_new",
             )?;
-            owned::publish(
+            owned::publish_managed(
+                self.request.plan.install_scope,
                 text(&item.source)?,
                 text(&destination)?,
                 &item.resource.sha256,
@@ -1162,6 +1205,7 @@ impl Transaction<'_> {
             "replace_owned",
         )?;
         system::replace_registration_observed(
+            self.request.plan.install_scope,
             &self.request.plan.app_id,
             self.prepared.registration.as_ref(),
             self.prepared.next_registration.as_ref(),
@@ -1213,7 +1257,8 @@ impl Transaction<'_> {
                     &receipt.resource.sha256,
                     "commit_receipt",
                 )?;
-                owned::publish(
+                owned::publish_managed(
+                    self.request.plan.install_scope,
                     text(&receipt.source)?,
                     text(&receipt.resource.path)?,
                     &receipt.resource.sha256,
@@ -1310,7 +1355,8 @@ impl Transaction<'_> {
                 &item.resource.sha256,
                 &index.to_string(),
             )?;
-            owned::publish(
+            owned::publish_managed(
+                self.request.plan.install_scope,
                 text(&item.source)?,
                 text(&item.resource.path)?,
                 &item.resource.sha256,
@@ -1333,6 +1379,7 @@ impl Transaction<'_> {
         }
         self.confirm_untouched()?;
         system::verify_registration(
+            self.request.plan.install_scope,
             &self.request.plan.app_id,
             self.prepared.registration.as_ref(),
         )?;
@@ -1377,6 +1424,18 @@ pub(crate) fn validate_repair_candidate(
     );
     let mut expected = previous.clone();
     expected.task_id = plan.task_id.clone();
+    ensure!(
+        previous.install_scope == plan.install_scope
+            && candidate.install_scope == plan.install_scope,
+        "repair cannot change installation scope"
+    );
+    avelin_core::scope::validate_owned_installation(
+        plan.install_scope,
+        &plan.install_dir,
+        &previous.user_sid,
+        &plan.user_sid,
+    )?;
+    expected.user_sid = plan.user_sid.clone();
     expected.commit_id = candidate.commit_id.clone();
     expected.previous_commit_id = Some(previous.commit_id.clone());
     expected.uninstaller_sha256 = None;
@@ -1404,11 +1463,17 @@ pub(crate) fn verify_repair(
         receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
-            && receipt.user_sid == user_sid
+            && receipt.install_scope == manifest.install_scope
             && key(Path::new(&receipt.install_dir)) == key(target),
         "repair verification belongs to another installation or package"
     );
     receipt.validate_manifest(manifest)?;
+    avelin_core::scope::validate_owned_installation(
+        manifest.install_scope,
+        target,
+        &receipt.user_sid,
+        user_sid,
+    )?;
     let expected_manifest = serde_json::to_vec_pretty(manifest)?;
     let allowed = allowed_old(manifest, &receipt, &bytes, &expected_manifest, target)?;
     let mut preserved = Vec::new();
@@ -1622,6 +1687,9 @@ mod tests {
             let worker = base.join("worker.exe");
             fs::write(&worker, b"test worker").unwrap();
             let manifest = Manifest {
+                install_scope: avelin_core::InstallScope::CurrentUser,
+                prerequisites: vec![],
+                updates: None,
                 components: vec![],
                 schema_version: 1,
                 app_id: format!("org.avelin.native-test.{id}"),
@@ -1649,6 +1717,7 @@ mod tests {
             )
             .unwrap();
             let receipt = Receipt {
+                install_scope: manifest.install_scope,
                 selected_components: vec![],
                 schema_version: 1,
                 app_id: manifest.app_id.clone(),
@@ -1691,6 +1760,7 @@ mod tests {
             fs::create_dir_all(lock.parent().unwrap()).unwrap();
             fs::write(&lock, format!("{}\n", identity.pid)).unwrap();
             let record = avelin_core::session::SessionRecord {
+                install_scope: self.plan.install_scope,
                 schema_version: 1,
                 task_id: plan.task_id.clone(),
                 app_id: plan.app_id.clone(),
@@ -1823,6 +1893,7 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(self.product_lock());
             let _ = system::restore_registration(
+                avelin_core::InstallScope::CurrentUser,
                 &self.manifest.app_id,
                 None,
                 Some(&Registration::new(&self.manifest, &self.root)),
@@ -1830,6 +1901,7 @@ mod tests {
             let mut next = self.manifest.clone();
             next.app_version = "2.0.0".into();
             let _ = system::restore_registration(
+                avelin_core::InstallScope::CurrentUser,
                 &next.app_id,
                 None,
                 Some(&Registration::new(&next, &self.root)),
@@ -2400,6 +2472,7 @@ mod tests {
         fs::write(fixture.root.join("notes.txt"), b"private data").unwrap();
         fs::remove_file(fixture.root.join(".avelin/avelin-app.exe")).unwrap();
         system::replace_registration(
+            avelin_core::InstallScope::CurrentUser,
             &fixture.manifest.app_id,
             Some(&Registration::new(&fixture.manifest, &fixture.root)),
             None,
@@ -2517,6 +2590,7 @@ mod tests {
         );
         let legacy = Registration::legacy(&fixture.manifest, &fixture.root);
         system::replace_registration(
+            avelin_core::InstallScope::CurrentUser,
             &fixture.manifest.app_id,
             Some(&Registration::new(&fixture.manifest, &fixture.root)),
             Some(&legacy),
@@ -2549,7 +2623,12 @@ mod tests {
             fs::read(fixture.root.join("entry.txt")).unwrap(),
             b"payload"
         );
-        system::verify_registration(&fixture.manifest.app_id, Some(&legacy)).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            Some(&legacy),
+        )
+        .unwrap();
         verify_repair(&fixture.manifest, &fixture.root, &fixture.plan.user_sid).unwrap();
 
         let session = fixture.session("uninstall-legacy");
@@ -2568,7 +2647,12 @@ mod tests {
         request.receipt = &receipt;
         let outcome = execute(request, &mut Observer::default()).unwrap();
         assert_eq!(outcome.exit_code, 0, "{}", outcome.detail);
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
     }
 
     struct InterruptPublish;
@@ -2741,7 +2825,12 @@ mod tests {
                 )
                 .is_err()
             );
-            system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+            system::verify_registration(
+                avelin_core::InstallScope::CurrentUser,
+                &fixture.manifest.app_id,
+                None,
+            )
+            .unwrap();
             assert!(fixture.root.join(MARKER).exists());
         }
     }
@@ -2813,6 +2902,7 @@ mod tests {
             let expected_registration = if legacy {
                 let legacy = Registration::legacy(&fixture.manifest, &fixture.root);
                 system::replace_registration(
+                    avelin_core::InstallScope::CurrentUser,
                     &fixture.manifest.app_id,
                     Some(&Registration::new(&fixture.manifest, &fixture.root)),
                     Some(&legacy),
@@ -2884,9 +2974,15 @@ mod tests {
                 fs::read(fixture.root.join("entry.txt")).unwrap(),
                 b"payload"
             );
-            system::verify_registration(&manifest.app_id, Some(&expected_registration)).unwrap();
+            system::verify_registration(
+                avelin_core::InstallScope::CurrentUser,
+                &manifest.app_id,
+                Some(&expected_registration),
+            )
+            .unwrap();
             if legacy {
                 system::replace_registration(
+                    avelin_core::InstallScope::CurrentUser,
                     &fixture.manifest.app_id,
                     Some(&expected_registration),
                     Some(&Registration::new(&fixture.manifest, &fixture.root)),
@@ -3015,7 +3111,12 @@ mod tests {
         );
         assert!(!fixture.root.join(RECEIPT_NAME).exists());
         assert!(!fixture.root.join("uninstall.exe").exists());
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
     }
     #[test]
     fn failure_after_registration_removes_only_new_owned_resources() {
@@ -3036,7 +3137,12 @@ mod tests {
         assert_eq!(fs::read(fixture.root.join("notes.txt")).unwrap(), b"keep");
         assert!(!fixture.root.join("entry.txt").exists());
         assert!(!fixture.root.join(MARKER).exists());
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
     }
     #[test]
     fn cancellation_requires_observer_command_and_rolls_back() {
@@ -3099,7 +3205,12 @@ mod tests {
             b"existing"
         );
         assert!(!session.join("staging").exists());
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
     }
     #[test]
     fn lost_confirmation_after_commit_keeps_the_complete_installation() {
@@ -3121,6 +3232,7 @@ mod tests {
             b"payload"
         );
         system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
             &fixture.manifest.app_id,
             Some(&Registration::new(&fixture.manifest, &fixture.root)),
         )
@@ -3173,6 +3285,7 @@ mod tests {
             );
             assert!(!fixture.root.join(MARKER).exists());
             system::verify_registration(
+                avelin_core::InstallScope::CurrentUser,
                 &fixture.manifest.app_id,
                 Some(&Registration::new(&fixture.manifest, &fixture.root)),
             )
@@ -3278,7 +3391,12 @@ mod tests {
         .unwrap();
         assert_eq!(outcome.exit_code, 2);
         assert!(!fixture.root.exists());
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
     }
     #[test]
     fn rollback_preserves_a_new_file_modified_after_publication_and_reports_unknown() {
@@ -3381,7 +3499,13 @@ mod tests {
         impl EngineObserver for DeleteRegistration {
             fn progress(&mut self, phase: &str, current: u64, _: u64) -> Result<()> {
                 if phase == "extracting" && current == 1 && !self.deleted {
-                    system::replace_registration(&self.id, Some(&self.old), None, &mut None)?;
+                    system::replace_registration(
+                        avelin_core::InstallScope::CurrentUser,
+                        &self.id,
+                        Some(&self.old),
+                        None,
+                        &mut None,
+                    )?;
                     self.deleted = true;
                 }
                 Ok(())
@@ -3426,7 +3550,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.exit_code, 4, "{}", outcome.detail);
-        system::verify_registration(&fixture.manifest.app_id, None).unwrap();
+        system::verify_registration(
+            avelin_core::InstallScope::CurrentUser,
+            &fixture.manifest.app_id,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             fs::read(fixture.root.join("entry.txt")).unwrap(),
             b"payload"

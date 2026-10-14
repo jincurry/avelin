@@ -148,6 +148,9 @@ mod tests {
         fn manifest(&self) -> Manifest {
             Manifest {
                 schema_version: SCHEMA_VERSION,
+                install_scope: avelin_core::InstallScope::CurrentUser,
+                prerequisites: vec![],
+                updates: None,
                 components: vec![],
                 app_id: "dev.avelin.native-build-test".into(),
                 app_name: "Native Build".into(),

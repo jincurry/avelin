@@ -3,10 +3,14 @@
 .SYNOPSIS
 Build, package and validate the Rust engine on a provisioned Windows host.
 .DESCRIPTION
-Uses installed tools only; never installs Rust, targets, Python or SDKs.
+Uses installed tools and schema-requirements.txt dependencies only; never installs
+Rust, targets, Python, Python libraries or SDKs. Set PYTHONPATH to the prepared
+schema dependency directory, as the GitHub workflow does in a separate step.
 Cargo may fetch dependencies selected by Cargo.lock. Builds current components,
 packages and extracts a Rust devkit, then runs lifecycle, interruption, maintenance,
-optional-component and Windows maintenance-entry cases against extracted binaries.
+optional-component, Windows maintenance-entry, runtime prerequisite and update
+publishing cases against extracted binaries. Elevated hosts also run machine-scope
+acceptance; other hosts explicitly retain NeedsElevation for that stage.
 OutputDirectory must be a new directory under this repository's target tree.
 Interrupted scenes, user-scoped test registrations and private evidence remain
 available for inspection; this entry never recursively deletes them. Interruption
@@ -138,7 +142,7 @@ try {
     $pythonVersion = InvokeRecorded 'python-version' $python @('-c', 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required"; print(sys.version)')
     $summary.tools = @{ rust_toolchain = $RustToolchain; expected_rust_version = $ExpectedRustVersion; rustc_verbose = $version; rust_executable_hashes = $rustExecutables; python = $pythonVersion }
     $summary.cargo_lock_sha256 = Hash (Join-Path $projectRoot 'Cargo.lock')
-    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/run-windows-maintenance-entry.ps1', 'tests/harness/windows-shell-link.ps1')
+    $harnessSources = @('tests/harness/run-rust-engine.ps1', 'tests/harness/run-rust-engine-interruption.ps1', 'tests/harness/run-rust-maintenance.ps1', 'tests/harness/run-rust-components.ps1', 'tests/harness/run-windows-maintenance-entry.ps1', 'tests/harness/run-windows-features.ps1', 'tests/harness/run-rust-all-users.ps1', 'tests/harness/windows-shell-link.ps1', 'tests/harness/check-m3-schemas.py', 'tests/harness/check-windows-feature-schemas.py', 'tests/harness/schema-requirements.txt')
     $summary.harness_sources = @(foreach ($relative in $harnessSources) {
         @{ path = $relative; sha256 = Hash (Join-Path $projectRoot $relative) }
     })
@@ -152,6 +156,9 @@ try {
         clean_environment_claim = $false
     }
     $env:CARGO_TARGET_DIR = $targetDirectory
+    $null = InvokeRecorded 'schema-dependencies' $python @('-c', 'import importlib.util; names = ["jsonschema", "referencing", "attrs", "rpds"]; missing = [name for name in names if importlib.util.find_spec(name) is None]; assert not missing, "Schema validation dependencies missing; prepare tests/harness/schema-requirements.txt and set PYTHONPATH: " + ", ".join(missing); print("Schema dependencies available")')
+    $null = InvokeRecorded 'schema-m3' $python @((Join-Path $projectRoot 'tests/harness/check-m3-schemas.py'))
+    $null = InvokeRecorded 'schema-windows-features' $python @((Join-Path $projectRoot 'tests/harness/check-windows-feature-schemas.py'))
     $null = InvokeRecorded 'fmt' $rustup @('run', $RustToolchain, 'cargo', 'fmt', '--all', '--', '--check')
     # The verified toolchain host is x64 MSVC. Native-host output preserves the
     # existing local Cargo cache layout.
@@ -331,6 +338,63 @@ try {
         Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Windows maintenance component does not match the extracted ZIP: $name"
     }
     $summary.windows_maintenance = @{ status = $windowsMaintenance.status; case_count = @($windowsMaintenance.cases).Count; report = $windowsMaintenanceReport; report_sha256 = Hash $windowsMaintenanceReport }
+    $featuresDirectory = Join-Path $runRoot 'windows-features'
+    $null = InvokeRecorded 'windows-features' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-windows-features.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $featuresDirectory)
+    $featuresReport = Join-Path $featuresDirectory 'summary.json'
+    $features = ReadJson $featuresReport
+    $featuresCases = @(
+        'schema2-runtime-and-update-configuration', 'reject-unknown-runtime-field',
+        'reject-unknown-runtime-kind', 'reject-invalid-runtime-version', 'reject-duplicate-runtime-kind',
+        'reject-insecure-update-feed', 'missing-runtime-blocks-before-worker-target-or-lock',
+        'no-requirements-install', 'no-requirements-uninstall', 'update-feed-binds-actual-setup',
+        'update-feed-rejects-http', 'update-check-rejects-no-feed-without-network'
+    )
+    Require ($features.status -ceq 'PASSED' -and @($features.cases).Count -eq 13) 'Windows feature acceptance has incomplete evidence.'
+    foreach ($label in $featuresCases) {
+        $case = @($features.cases | Where-Object { $_.label -ceq $label })
+        Require ($case.Count -eq 1 -and $case[0].status -ceq 'PASSED') "Windows feature case absent, duplicated or failed: $label"
+    }
+    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+    $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Require ($features.elevated -is [bool] -and $features.elevated -eq $elevated) 'Windows feature acceptance used a different elevation state.'
+    $denial = @($features.cases | Where-Object { $_.label -ceq 'all-users-silent-refuses-without-elevation' })
+    $expectedDenial = if ($elevated) { 'NeedsNonElevated' } else { 'PASSED' }
+    Require ($denial.Count -eq 1 -and $denial[0].status -ceq $expectedDenial) 'Non-elevated rejection evidence does not match the actual token.'
+    Require (@($features.components).Count -eq $extractedComponents.Count) 'Windows feature component count differs.'
+    foreach ($name in $extractedComponents.Keys) {
+        $record = @($features.components | Where-Object { [string]::Equals([string]$_.path, $extractedComponents[$name], [StringComparison]::OrdinalIgnoreCase) })
+        Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Windows features did not use extracted component: $name"
+    }
+    $summary.windows_features = @{ status = $features.status; case_count = @($features.cases | Where-Object { $_.status -ceq 'PASSED' }).Count; non_elevated_rejection = $expectedDenial; report = $featuresReport; report_sha256 = Hash $featuresReport }
+    $machineDirectory = Join-Path $runRoot 'all-users'
+    $machineReport = Join-Path $machineDirectory 'summary.json'
+    if ($elevated) {
+        $null = InvokeRecorded 'rust-all-users' $pwsh @('-NoProfile', '-File', (Join-Path $projectRoot 'tests/harness/run-rust-all-users.ps1'), '-Runtime', $extractedComponents.runtime, '-Cli', $extractedComponents.cli, '-RustWorker', $extractedComponents.rust_worker, '-Sample', $extractedComponents.sample, '-OutputRoot', $machineDirectory)
+        $machine = ReadJson $machineReport
+        $machineCases = @(
+            'package-all-users-scope', 'reject-user-writable-target-before-mutation',
+            'install-hklm-public-shortcuts-protected-files', 'offline-machine-repair-without-setup',
+            'offline-machine-component-add', 'machine-upgrade-inherits-selection',
+            'machine-interruption-retains-protected-evidence', 'machine-recovery-inspection',
+            'machine-recovery-restores-owned-version', 'offline-machine-component-remove',
+            'machine-uninstall-removes-managed-resources'
+        )
+        Require ($machine.status -ceq 'PASSED' -and @($machine.cases).Count -eq $machineCases.Count) 'Machine scope acceptance did not pass every required case.'
+        foreach ($label in $machineCases) {
+            $case = @($machine.cases | Where-Object { $_.label -ceq $label })
+            Require ($case.Count -eq 1 -and $case[0].status -ceq 'PASSED') "Machine scope case absent, duplicated or failed: $label"
+        }
+        Require (@($machine.components).Count -eq $extractedComponents.Count) 'Machine scope component count differs.'
+        foreach ($name in $extractedComponents.Keys) {
+            $record = @($machine.components | Where-Object { [string]::Equals([string]$_.path, $extractedComponents[$name], [StringComparison]::OrdinalIgnoreCase) })
+            Require ($record.Count -eq 1 -and $record[0].sha256 -ceq (Hash $extractedComponents[$name])) "Machine scope did not use extracted component: $name"
+        }
+    } else {
+        $null = [IO.Directory]::CreateDirectory($machineDirectory)
+        $machine = @{ schema_version = 1; status = 'NeedsElevation'; cases = @(); reason = 'This process is not elevated; machine-scope acceptance was not run.' }
+        Save $machineReport $machine
+    }
+    $summary.all_users = @{ status = $machine.status; case_count = @($machine.cases).Count; report = $machineReport; report_sha256 = Hash $machineReport }
     # Make sure validation left the distributable and extracted inputs unchanged.
     $finalVerification = (InvokeRecorded 'verify-kit-after-acceptance' $pwsh @('-NoProfile', '-File', (Join-Path $kitRoot 'Verify-RustDevKit.ps1'), '-KitDirectory', $kitRoot, '-ZipPath', $zipPath)) | ConvertFrom-Json
     Require ($finalVerification.verified -eq $true -and (Hash $zipPath) -ceq $zipHash) 'Package changed during acceptance.'

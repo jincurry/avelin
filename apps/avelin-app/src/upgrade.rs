@@ -165,7 +165,10 @@ fn registry_dword(key: &Key, name: &str) -> Result<u32> {
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-pub fn registration(app_id: &str) -> Result<Option<Registration>> {
+pub fn registration(
+    scope: avelin_core::InstallScope,
+    app_id: &str,
+) -> Result<Option<Registration>> {
     avelin_core::safe_id(app_id)?;
     let name = wide(&format!(
         r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Avelin.M0.{app_id}"
@@ -173,7 +176,10 @@ pub fn registration(app_id: &str) -> Result<Option<Registration>> {
     let mut raw = ptr::null_mut();
     let status = unsafe {
         RegOpenKeyExW(
-            0x80000001u32 as i32 as isize as *mut c_void,
+            match scope {
+                avelin_core::InstallScope::CurrentUser => 0x80000001u32,
+                avelin_core::InstallScope::AllUsers => 0x80000002u32,
+            } as i32 as isize as *mut c_void,
             name.as_ptr(),
             0,
             0x0001 | 0x0100,
@@ -311,7 +317,7 @@ pub fn prepare(
     resources::validate_backend(&worker, &old)
         .context("upgrade requires an existing Rust installation; uninstall the older product with its original installer first")?;
     ensure!(
-        manifest.app_id == old.app_id,
+        manifest.app_id == old.app_id && manifest.install_scope == old.install_scope,
         "upgrade product identity conflicts with the existing installation"
     );
     // Semantic precedence deliberately ignores build metadata.
@@ -325,8 +331,8 @@ pub fn prepare(
         avelin_core::model::ensure_newer_version(&old.app_version, &manifest.app_version)?;
     }
     let selected_files = avelin_core::resolve_selection(manifest, selected)?.files;
-    let registration =
-        registration(&old.app_id)?.context("upgrade requires the existing product registration")?;
+    let registration = registration(old.install_scope, &old.app_id)?
+        .context("upgrade requires the existing product registration")?;
     verify_registration(&registration, &old, target)?;
     let mut backup = Vec::new();
     let mut preserved = Vec::new();
@@ -403,7 +409,7 @@ pub fn prepare(
         (ShortcutKind::Desktop, desktop),
         (ShortcutKind::StartMenu, start_menu),
     ] {
-        let path = resources::shortcut_path(&manifest.app_id, kind)?;
+        let path = resources::shortcut_path(manifest.install_scope, &manifest.app_id, kind)?;
         let old_record = receipt.shortcuts.iter().find(|item| item.kind == kind);
         if let Some(current) = observe(&path)? {
             match old_record {
@@ -571,7 +577,7 @@ pub fn verify_rollback(previous: &PreviousInstallation, target: &Path) -> Result
     }
     verify_preserved(previous)?;
     verify_registration(
-        &registration(&previous.manifest.app_id)?
+        &registration(previous.manifest.install_scope, &previous.manifest.app_id)?
             .context("old registration missing after failed upgrade")?,
         &previous.manifest,
         target,

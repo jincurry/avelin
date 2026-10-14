@@ -1,9 +1,13 @@
 mod component_selection;
 mod coordinator;
+mod elevation;
 mod execution_files;
 mod failure_report;
+mod gui_stdio;
 mod installed_maintenance;
 mod maintenance;
+#[cfg(feature = "gui")]
+mod online_update;
 mod preflight;
 mod resources;
 mod runtime_log;
@@ -14,11 +18,31 @@ use failure_report::{FailureRecord, TaskEvidence};
 
 fn main() {
     let args = coordinator::Args::parse();
+    let graphical = cfg!(feature = "gui") && coordinator::requests_gui(&args);
+    let _gui_streams = if graphical {
+        match gui_stdio::initialize() {
+            Ok(streams) => Some(streams),
+            Err(error) => {
+                let record = FailureRecord::new(
+                    "AVELIN_GUI_STDIO",
+                    &format!("could not initialize graphical output handles: {error}"),
+                    3,
+                    TaskEvidence::NotStarted,
+                    args.report.clone(),
+                    diagnostics_snapshot(),
+                );
+                report_failure(&record, true, args.english);
+                std::process::exit(3);
+            }
+        }
+    } else {
+        None
+    };
     if let Err(error) = execution_files::initialize_dll_search() {
-        eprintln!("AVELIN_EXECUTION_SECURITY: {error:#}");
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "AVELIN_EXECUTION_SECURITY: {error:#}");
         std::process::exit(3);
     }
-    let graphical = cfg!(feature = "gui") && coordinator::requests_gui(&args);
     let english = args.english;
     let requested_report = args.report.clone();
     // Help/version/argument errors have already exited, and explicit CLI paths

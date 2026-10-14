@@ -130,3 +130,19 @@ GUI 使用清单选择，同版本原包维护页提供“修复安装 / 更改�
 ```
 
 外部 runtime 等待静默结果并返回实际退出码；安装目录内的驻留 runtime 不接受 `--maintenance --silent`，请使用外部配套 runtime 或原始 Setup，驻留 GUI 入口不受影响。普通操作占用预检阻塞时，静默退出 `3`，报告 `result: "NotStarted"`、`worker_started: false` 和诊断码 `AVELIN_RESOURCES_IN_USE`；`preflight` 包含进程/PID、被占用文件和未能完成的检查。释放占用后用新报告路径重试。GUI 提供“重新检查”，不会强制退出应用。`recover` 仍使用原证据规则。完整命令限制和降级路径见[Windows 维护入口](windows-maintenance.md)。
+
+## HTTPS 更新元数据与下载
+
+以下命令不上传或执行包。输出文件使用新路径；`update-check` 的产品、当前版本和 feed 来自本地 Setup 内嵌配置，命令行没有任意 feed URL 覆盖参数。
+
+```powershell
+avelin-cli update-feed --setup .\out\Application-2.0.0-Setup.exe `
+  --setup-url 'https://downloads.example.com/Application-2.0.0-Setup.exe' `
+  --channel stable --output .\out\stable.json
+avelin-cli update-check --setup .\Application-1.0.0-Setup.exe
+avelin-cli update-check --setup .\Application-1.0.0-Setup.exe --download .\downloads\Application-2.0.0-Setup.exe
+```
+
+`update-feed` 从最终 Setup 生成 `schema_version: 1` 元数据，默认 `--channel stable`；签名若改变 EXE，须先签名再生成 feed。`update-check` 输出 `available` / `up_to_date`，加 `--download` 且有新版本时输出 `downloaded`。相同或更低优先级版本不会下载。下载核验失败返回非零，不发布可用包或启动进程。
+
+配置新增 `[updates]`、`[[prerequisites]]` 和 `install.scope`，均需 schema 2。完整字段、TLS 与大小限制、静默管理员要求及发布步骤见[Windows 部署指南](windows-deployment.md)。旧省略这些字段的配置保持原行为。

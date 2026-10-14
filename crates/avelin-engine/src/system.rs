@@ -1,6 +1,6 @@
-//! Current-user Windows registration and shell links.
+//! Scope-bound Windows registration and shell links.
 use anyhow::{Context, Result, ensure};
-use avelin_core::{Manifest, ShortcutKind};
+use avelin_core::{InstallScope, Manifest, ShortcutKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -107,9 +107,9 @@ pub(crate) struct RegistrationSnapshot {
 pub(crate) type RegistrationObserver =
     Box<dyn FnMut(&RegistrationSnapshot, &RegistrationSnapshot, bool) -> Result<()>>;
 
-pub(crate) fn registration_snapshot(id: &str) -> Result<RegistrationSnapshot> {
+pub(crate) fn registration_snapshot(scope: InstallScope, id: &str) -> Result<RegistrationSnapshot> {
     Ok(RegistrationSnapshot {
-        values: raw_snapshot(id)?,
+        values: raw_snapshot(scope, id)?,
     })
 }
 
@@ -132,7 +132,7 @@ pub(crate) fn registration_for_product(
     manifest: &Manifest,
     target: &Path,
 ) -> Result<Option<Registration>> {
-    let Some(values) = raw_snapshot(&manifest.app_id)? else {
+    let Some(values) = raw_snapshot(manifest.install_scope, &manifest.app_id)? else {
         return Ok(None);
     };
     for registration in [
@@ -189,6 +189,13 @@ const NAMES: [&str; 8] = [
 ];
 type Handle = *mut c_void;
 const HKCU: Handle = 0x80000001u32 as i32 as isize as Handle;
+const HKLM: Handle = 0x80000002u32 as i32 as isize as Handle;
+fn registry_root(scope: InstallScope) -> Handle {
+    match scope {
+        InstallScope::CurrentUser => HKCU,
+        InstallScope::AllUsers => HKLM,
+    }
+}
 #[link(name = "advapi32")]
 unsafe extern "system" {
     fn RegOpenKeyExW(
@@ -261,11 +268,11 @@ fn key_name(id: &str) -> Result<Vec<u16>> {
         r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Avelin.M0.{id}"
     )))
 }
-fn raw_snapshot(id: &str) -> Result<Option<Values>> {
+fn raw_snapshot(scope: InstallScope, id: &str) -> Result<Option<Values>> {
     let mut handle = ptr::null_mut();
     let status = unsafe {
         RegOpenKeyExW(
-            HKCU,
+            registry_root(scope),
             key_name(id)?.as_ptr(),
             0,
             0x0001 | 0x0100,
@@ -346,9 +353,13 @@ fn snapshot_key(key: &Key) -> Result<Values> {
     );
     Ok(values)
 }
-pub fn verify_registration(id: &str, expected: Option<&Registration>) -> Result<()> {
+pub fn verify_registration(
+    scope: InstallScope,
+    id: &str,
+    expected: Option<&Registration>,
+) -> Result<()> {
     ensure!(
-        raw_snapshot(id)? == expected.map(Registration::values),
+        raw_snapshot(scope, id)? == expected.map(Registration::values),
         "product registration does not match the owned installation"
     );
     Ok(())
@@ -362,6 +373,7 @@ const REGISTRATION_ACCESS: u32 = 0x0001 | 0x0002 | 0x0001_0000 | 0x0100;
 /// neither atomic nor isolated from an unrelated writer to this same key.
 /// Crucially, recovery never reopens an updated/created key by pathname.
 pub struct RegistrationChange {
+    scope: InstallScope,
     id: String,
     key: Option<Key>,
     before: Option<Values>,
@@ -372,12 +384,13 @@ pub struct RegistrationChange {
     observer: Option<RegistrationObserver>,
 }
 
-fn create_new_key(id: &str) -> Result<Key> {
+fn create_new_key(scope: InstallScope, id: &str) -> Result<Key> {
+    avelin_core::scope::require_elevation(scope)?;
     let mut handle = ptr::null_mut();
     let mut disposition = 0;
     let status = unsafe {
         RegCreateKeyExW(
-            HKCU,
+            registry_root(scope),
             key_name(id)?.as_ptr(),
             0,
             ptr::null_mut(),
@@ -405,11 +418,11 @@ fn delete_key(key: &Key) -> Result<()> {
     Ok(())
 }
 
-fn flush_registration_parent() -> Result<()> {
+fn flush_registration_parent(scope: InstallScope) -> Result<()> {
     let mut parent = ptr::null_mut();
     let status = unsafe {
         RegOpenKeyExW(
-            HKCU,
+            registry_root(scope),
             wide(r"Software\Microsoft\Windows\CurrentVersion\Uninstall").as_ptr(),
             0,
             0x0001 | 0x0100,
@@ -551,9 +564,9 @@ impl RegistrationChange {
         // The deleted object has no values that recovery may update. Close it
         // before CREATE_NEW restoration; any replacement key must be preserved.
         self.key.take();
-        flush_registration_parent()?;
+        flush_registration_parent(self.scope)?;
         ensure!(
-            raw_snapshot(&self.id)?.is_none(),
+            raw_snapshot(self.scope, &self.id)?.is_none(),
             "product registration was recreated; preserve it"
         );
         self.observe(&before, &after, true)
@@ -573,7 +586,7 @@ impl RegistrationChange {
                 values: Some(Values::new()),
             };
             self.observe(&absent, &empty, false)?;
-            let key = create_new_key(&self.id)?;
+            let key = create_new_key(self.scope, &self.id)?;
             self.key = Some(key);
             self.expected = Values::new();
             self.created = true;
@@ -596,21 +609,24 @@ impl RegistrationChange {
 
 #[cfg(test)]
 pub fn replace_registration(
+    scope: InstallScope,
     id: &str,
     before: Option<&Registration>,
     after: Option<&Registration>,
     change: &mut Option<RegistrationChange>,
 ) -> Result<()> {
-    replace_registration_observed(id, before, after, change, None)
+    replace_registration_observed(scope, id, before, after, change, None)
 }
 
 pub(crate) fn replace_registration_observed(
+    scope: InstallScope,
     id: &str,
     before: Option<&Registration>,
     after: Option<&Registration>,
     change: &mut Option<RegistrationChange>,
     mut observer: Option<RegistrationObserver>,
 ) -> Result<()> {
+    avelin_core::scope::require_elevation(scope)?;
     ensure!(
         change.is_none(),
         "registration mutation guard already exists"
@@ -618,13 +634,13 @@ pub(crate) fn replace_registration_observed(
     let before_values = before.map(Registration::values);
     let after_values = after.map(Registration::values);
     if before_values.is_none() && after_values.is_none() {
-        return verify_registration(id, None);
+        return verify_registration(scope, id, None);
     }
     let (key, created) = if let Some(expected) = &before_values {
         let mut handle = ptr::null_mut();
         let status = unsafe {
             RegOpenKeyExW(
-                HKCU,
+                registry_root(scope),
                 key_name(id)?.as_ptr(),
                 0,
                 REGISTRATION_ACCESS,
@@ -651,11 +667,12 @@ pub(crate) fn replace_registration_observed(
                 false,
             )?;
         }
-        (create_new_key(id)?, true)
+        (create_new_key(scope, id)?, true)
     };
     // CREATE_NEW already changed the registry; retain its exact handle before
     // any further fallible work. Opening an existing key has changed nothing.
     *change = Some(RegistrationChange {
+        scope,
         id: id.into(),
         key: Some(key),
         before: before_values.clone(),
@@ -679,22 +696,24 @@ pub(crate) fn replace_registration_observed(
     } else {
         guard.remove()?;
     }
-    verify_registration(id, after)
+    verify_registration(scope, id, after)
 }
 
 /// The caller must authorize expected_current from durable, task-bound evidence.
 /// A fresh pinned key is compared before every mutation. A competing writer or
 /// recreated key is preserved. Every compensation has the same durable observer.
 pub(crate) fn restore_registration_snapshot(
+    scope: InstallScope,
     id: &str,
     expected_current: &RegistrationSnapshot,
     target: &RegistrationSnapshot,
     mut observer: Option<RegistrationObserver>,
 ) -> Result<()> {
+    avelin_core::scope::require_elevation(scope)?;
     validate_snapshot(expected_current)?;
     validate_snapshot(target)?;
     ensure!(
-        registration_snapshot(id)? == *expected_current,
+        registration_snapshot(scope, id)? == *expected_current,
         "product registration changed since recovery inspection"
     );
     if expected_current == target {
@@ -704,7 +723,7 @@ pub(crate) fn restore_registration_snapshot(
         let mut handle = ptr::null_mut();
         let status = unsafe {
             RegOpenKeyExW(
-                HKCU,
+                registry_root(scope),
                 key_name(id)?.as_ptr(),
                 0,
                 REGISTRATION_ACCESS,
@@ -728,9 +747,10 @@ pub(crate) fn restore_registration_snapshot(
                 false,
             )?;
         }
-        (create_new_key(id)?, true)
+        (create_new_key(scope, id)?, true)
     };
     let mut guard = RegistrationChange {
+        scope,
         id: id.into(),
         key: Some(key),
         before: expected_current.values.clone(),
@@ -754,7 +774,7 @@ pub(crate) fn restore_registration_snapshot(
         guard.remove()?;
     }
     ensure!(
-        registration_snapshot(id)? == *target,
+        registration_snapshot(scope, id)? == *target,
         "recovered product registration did not verify"
     );
     Ok(())
@@ -764,50 +784,20 @@ pub(crate) fn restore_registration_snapshot(
 /// compensation uses the live RegistrationChange instead of reacquiring names.
 #[cfg(test)]
 pub fn restore_registration(
+    scope: InstallScope,
     id: &str,
     before: Option<&Registration>,
     after: Option<&Registration>,
 ) -> Result<()> {
-    if raw_snapshot(id)? == before.map(Registration::values) {
+    if raw_snapshot(scope, id)? == before.map(Registration::values) {
         return Ok(());
     }
-    replace_registration(id, after, before, &mut None)
+    replace_registration(scope, id, after, before, &mut None)
 }
 
-pub fn shortcut_path(app_id: &str, kind: ShortcutKind) -> Result<PathBuf> {
+pub fn shortcut_path(scope: InstallScope, app_id: &str, kind: ShortcutKind) -> Result<PathBuf> {
     avelin_core::safe_id(app_id)?;
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn SHGetFolderPathW(
-            window: Handle,
-            folder: i32,
-            token: Handle,
-            flags: u32,
-            path: *mut u16,
-        ) -> i32;
-    }
-    let mut path = [0u16; 260];
-    let folder = match kind {
-        ShortcutKind::Desktop => 0x10,
-        ShortcutKind::StartMenu => 0x02,
-    };
-    ensure!(
-        unsafe {
-            SHGetFolderPathW(
-                ptr::null_mut(),
-                folder,
-                ptr::null_mut(),
-                0,
-                path.as_mut_ptr(),
-            )
-        } >= 0,
-        "resolve current-user shortcut folder"
-    );
-    let end = path
-        .iter()
-        .position(|v| *v == 0)
-        .context("invalid shell folder")?;
-    let result = PathBuf::from(String::from_utf16(&path[..end])?).join(format!("{app_id}.lnk"));
+    let result = avelin_core::scope::shortcut_folder(scope, kind)?.join(format!("{app_id}.lnk"));
     avelin_core::reject_reparse(&result)?;
     Ok(result)
 }
@@ -907,7 +897,14 @@ mod tests {
             Some(old.clone())
         );
         let mut change = None;
-        replace_registration(&fixture.id, Some(&old), Some(&current), &mut change).unwrap();
+        replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            Some(&old),
+            Some(&current),
+            &mut change,
+        )
+        .unwrap();
         assert_eq!(
             registration_for_product(&manifest, target).unwrap(),
             Some(current.clone())
@@ -923,11 +920,18 @@ mod tests {
             target
         ));
         change.as_mut().unwrap().restore().unwrap();
-        verify_registration(&fixture.id, Some(&old)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&old)).unwrap();
 
         let mut malformed = current.clone();
         malformed.modify_path = None;
-        replace_registration(&fixture.id, Some(&old), Some(&malformed), &mut None).unwrap();
+        replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            Some(&old),
+            Some(&malformed),
+            &mut None,
+        )
+        .unwrap();
         assert!(registration_for_product(&manifest, target).is_err());
         assert!(!snapshot_matches_product(
             &registration_expected(Some(&malformed)),
@@ -965,7 +969,14 @@ mod tests {
             }
         }
         fn install(&self, registration: &Registration) {
-            replace_registration(&self.id, None, Some(registration), &mut None).unwrap();
+            replace_registration(
+                InstallScope::CurrentUser,
+                &self.id,
+                None,
+                Some(registration),
+                &mut None,
+            )
+            .unwrap();
         }
         fn delete(&self) {
             assert_eq!(
@@ -995,7 +1006,7 @@ mod tests {
         let id = fixture.id.clone();
         let observer: RegistrationObserver = Box::new(move |before, after, complete| {
             assert_eq!(
-                registration_snapshot(&id)?,
+                registration_snapshot(InstallScope::CurrentUser, &id)?,
                 if complete { after } else { before }.clone()
             );
             captured
@@ -1010,6 +1021,7 @@ mod tests {
         let mut change = None;
         assert!(
             replace_registration_observed(
+                InstallScope::CurrentUser,
                 &fixture.id,
                 Some(&old),
                 Some(&next),
@@ -1019,19 +1031,20 @@ mod tests {
             .is_err()
         );
         drop(change);
-        let partial = registration_snapshot(&fixture.id).unwrap();
+        let partial = registration_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap();
         assert_ne!(partial, registration_expected(Some(&old)));
         assert_ne!(partial, registration_expected(Some(&next)));
         assert_eq!(events.borrow().len(), 2);
         assert_eq!(events.borrow()[0].1, partial);
         restore_registration_snapshot(
+            InstallScope::CurrentUser,
             &fixture.id,
             &partial,
             &registration_expected(Some(&old)),
             None,
         )
         .unwrap();
-        verify_registration(&fixture.id, Some(&old)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&old)).unwrap();
     }
 
     #[test]
@@ -1046,21 +1059,42 @@ mod tests {
         let id = fixture.id.clone();
         let observer: RegistrationObserver = Box::new(move |before, after, complete| {
             assert_eq!(
-                registration_snapshot(&id)?,
+                registration_snapshot(InstallScope::CurrentUser, &id)?,
                 if complete { after } else { before }.clone()
             );
             ensure!(!complete, "simulate interruption during compensation");
             Ok(())
         });
         assert!(
-            restore_registration_snapshot(&fixture.id, &before, &target, Some(observer)).is_err()
+            restore_registration_snapshot(
+                InstallScope::CurrentUser,
+                &fixture.id,
+                &before,
+                &target,
+                Some(observer)
+            )
+            .is_err()
         );
-        let interrupted = registration_snapshot(&fixture.id).unwrap();
+        let interrupted = registration_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap();
         assert_ne!(interrupted, before);
         assert_ne!(interrupted, target);
-        restore_registration_snapshot(&fixture.id, &interrupted, &target, None).unwrap();
-        restore_registration_snapshot(&fixture.id, &target, &target, None).unwrap();
-        verify_registration(&fixture.id, Some(&old)).unwrap();
+        restore_registration_snapshot(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            &interrupted,
+            &target,
+            None,
+        )
+        .unwrap();
+        restore_registration_snapshot(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            &target,
+            &target,
+            None,
+        )
+        .unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&old)).unwrap();
     }
 
     #[test]
@@ -1071,6 +1105,7 @@ mod tests {
         fixture.install(&external);
         assert!(
             restore_registration_snapshot(
+                InstallScope::CurrentUser,
                 &fixture.id,
                 &registration_expected(Some(&old)),
                 &registration_expected(None),
@@ -1078,7 +1113,7 @@ mod tests {
             )
             .is_err()
         );
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
         let mut invalid = registration_expected(Some(&external));
         invalid
             .values
@@ -1087,6 +1122,7 @@ mod tests {
             .insert("External".into(), (4, vec![0; 4]));
         assert!(
             restore_registration_snapshot(
+                InstallScope::CurrentUser,
                 &fixture.id,
                 &registration_expected(Some(&external)),
                 &invalid,
@@ -1094,7 +1130,7 @@ mod tests {
             )
             .is_err()
         );
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
@@ -1110,6 +1146,7 @@ mod tests {
         });
         assert!(
             replace_registration_observed(
+                InstallScope::CurrentUser,
                 &fixture.id,
                 None,
                 Some(&next),
@@ -1122,11 +1159,20 @@ mod tests {
         let empty = RegistrationSnapshot {
             values: Some(Values::new()),
         };
-        assert_eq!(registration_snapshot(&fixture.id).unwrap(), empty);
-        restore_registration_snapshot(&fixture.id, &empty, &registration_expected(None), None)
-            .unwrap();
         assert_eq!(
-            registration_snapshot(&fixture.id).unwrap(),
+            registration_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap(),
+            empty
+        );
+        restore_registration_snapshot(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            &empty,
+            &registration_expected(None),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            registration_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap(),
             registration_expected(None)
         );
     }
@@ -1137,28 +1183,58 @@ mod tests {
         let old = fixture.registration("1");
         let next = fixture.registration("2");
         let mut change = None;
-        assert!(replace_registration(&fixture.id, Some(&old), Some(&next), &mut change).is_err());
+        assert!(
+            replace_registration(
+                InstallScope::CurrentUser,
+                &fixture.id,
+                Some(&old),
+                Some(&next),
+                &mut change
+            )
+            .is_err()
+        );
         assert!(change.is_none());
-        assert_eq!(raw_snapshot(&fixture.id).unwrap(), None);
+        assert_eq!(
+            raw_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap(),
+            None
+        );
         let mut external = fixture.registration("external");
         external.display_name = "An external owner".into();
         fixture.install(&external);
-        assert!(replace_registration(&fixture.id, Some(&old), Some(&next), &mut change).is_err());
+        assert!(
+            replace_registration(
+                InstallScope::CurrentUser,
+                &fixture.id,
+                Some(&old),
+                Some(&next),
+                &mut change
+            )
+            .is_err()
+        );
         assert!(change.is_none());
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
     fn fresh_publication_does_not_adopt_a_key_created_after_preflight() {
         let fixture = RegistryFixture::new();
         let next = fixture.registration("2");
-        verify_registration(&fixture.id, None).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, None).unwrap();
         let external = fixture.registration("external");
         fixture.install(&external);
         let mut change = None;
-        assert!(replace_registration(&fixture.id, None, Some(&next), &mut change).is_err());
+        assert!(
+            replace_registration(
+                InstallScope::CurrentUser,
+                &fixture.id,
+                None,
+                Some(&next),
+                &mut change
+            )
+            .is_err()
+        );
         assert!(change.is_none());
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
@@ -1168,10 +1244,18 @@ mod tests {
         let next = fixture.registration("2");
         fixture.install(&old);
         let mut change = None;
-        replace_registration(&fixture.id, Some(&old), Some(&next), &mut change).unwrap();
+        replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            Some(&old),
+            Some(&next),
+            &mut change,
+        )
+        .unwrap();
         let external = fixture.registration("external");
         let mut external_change = None;
         replace_registration(
+            InstallScope::CurrentUser,
             &fixture.id,
             Some(&next),
             Some(&external),
@@ -1179,7 +1263,7 @@ mod tests {
         )
         .unwrap();
         assert!(change.as_mut().unwrap().restore().is_err());
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
@@ -1189,18 +1273,31 @@ mod tests {
         let next = fixture.registration("2");
         fixture.install(&old);
         let mut change = None;
-        replace_registration(&fixture.id, Some(&old), Some(&next), &mut change).unwrap();
+        replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            Some(&old),
+            Some(&next),
+            &mut change,
+        )
+        .unwrap();
         fixture.delete();
         let external = fixture.registration("external");
         let mut external_change = None;
-        let recreated =
-            replace_registration(&fixture.id, None, Some(&external), &mut external_change).is_ok();
+        let recreated = replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            None,
+            Some(&external),
+            &mut external_change,
+        )
+        .is_ok();
         assert!(change.as_mut().unwrap().restore().is_err());
         drop(change);
         if !recreated {
             fixture.install(&external);
         }
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
@@ -1209,17 +1306,24 @@ mod tests {
         let old = fixture.registration("1");
         fixture.install(&old);
         let mut change = None;
-        replace_registration(&fixture.id, Some(&old), None, &mut change).unwrap();
+        replace_registration(
+            InstallScope::CurrentUser,
+            &fixture.id,
+            Some(&old),
+            None,
+            &mut change,
+        )
+        .unwrap();
         let external = fixture.registration("external");
         fixture.install(&external);
         assert!(change.as_mut().unwrap().restore().is_err());
-        verify_registration(&fixture.id, Some(&external)).unwrap();
+        verify_registration(InstallScope::CurrentUser, &fixture.id, Some(&external)).unwrap();
     }
 
     #[test]
     fn empty_key_created_by_this_operation_is_cleaned_if_the_first_value_write_fails() {
         let fixture = RegistryFixture::new();
-        let created = create_new_key(&fixture.id).unwrap();
+        let created = create_new_key(InstallScope::CurrentUser, &fixture.id).unwrap();
         let mut handle = ptr::null_mut();
         // Open the same new key with QUERY and DELETE but without SET_VALUE to
         // get a real OS access-denied result on the first RegSetValueExW call.
@@ -1237,6 +1341,7 @@ mod tests {
         );
         drop(created);
         let mut change = RegistrationChange {
+            scope: InstallScope::CurrentUser,
             id: fixture.id.clone(),
             key: Some(Key(handle)),
             before: None,
@@ -1252,9 +1357,15 @@ mod tests {
                 .is_err()
         );
         assert!(!change.modified);
-        assert_eq!(raw_snapshot(&fixture.id).unwrap(), Some(Values::new()));
+        assert_eq!(
+            raw_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap(),
+            Some(Values::new())
+        );
         change.restore().unwrap();
-        assert_eq!(raw_snapshot(&fixture.id).unwrap(), None);
+        assert_eq!(
+            raw_snapshot(InstallScope::CurrentUser, &fixture.id).unwrap(),
+            None
+        );
     }
 
     #[test]

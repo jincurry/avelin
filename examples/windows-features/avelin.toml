@@ -1,0 +1,40 @@
+schema_version = 2
+
+[app]
+id = "dev.example.application"
+name = "示例应用"
+version = "1.0.0"
+entry = "Application.exe"
+
+[payload]
+directory = "payload"
+
+[install]
+scope = "all_users"
+directory_name = "ExampleApplication"
+desktop_shortcut = false
+start_menu_shortcut = true
+
+[updates]
+feed_url = "https://updates.example.com/application/stable.json"
+channel = "stable"
+
+# Only keep requirements used by the real application.
+[[prerequisites]]
+kind = "vc_redist_x64"
+min_version = "14.38.33135.0"
+
+[[prerequisites]]
+kind = "dotnet_desktop_x64"
+min_version = "8.0.0"
+
+[[prerequisites]]
+kind = "webview2_evergreen"
+min_version = "120.0.0.0"
+
+[[components]]
+id = "core"
+required = true
+name = { "zh-CN" = "主程序", "en-US" = "Application" }
+description = { "zh-CN" = "应用运行所需的文件", "en-US" = "Files required to run the application" }
+paths = ["Application.exe"]

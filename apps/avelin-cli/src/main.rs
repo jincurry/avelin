@@ -5,6 +5,7 @@ mod diagnose;
 mod init;
 mod native_builder;
 mod presentation_config;
+mod update;
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use std::{io::Read, path::PathBuf};
@@ -17,6 +18,24 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Create an HTTPS update feed from the actual full Setup package.
+    UpdateFeed {
+        #[arg(long)]
+        setup: PathBuf,
+        #[arg(long)]
+        setup_url: String,
+        #[arg(long, default_value = "stable")]
+        channel: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Check the update feed configured in an existing Setup; optionally download a verified newer Setup.
+    UpdateCheck {
+        #[arg(long)]
+        setup: PathBuf,
+        #[arg(long)]
+        download: Option<PathBuf>,
+    },
     /// Create a checked avelin.toml for existing application files; never copy or run them.
     Init {
         /// Directory in which to create a new avelin.toml (never overwritten).
@@ -86,6 +105,13 @@ enum Command {
 }
 fn main() -> Result<()> {
     match Args::parse().command {
+        Command::UpdateFeed {
+            setup,
+            setup_url,
+            channel,
+            output,
+        } => update::publish(&setup, &setup_url, &channel, &output)?,
+        Command::UpdateCheck { setup, download } => update::check(&setup, download.as_deref())?,
         Command::Init {
             directory,
             app_id,

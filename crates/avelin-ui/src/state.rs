@@ -16,6 +16,12 @@ pub(crate) enum LaunchStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateRequest {
+    Check,
+    Download,
+}
+
 pub(crate) struct UiState {
     snapshot: UiSnapshot,
     connected: bool,
@@ -26,6 +32,11 @@ pub(crate) struct UiState {
     responses_open: bool,
     launch_status: LaunchStatus,
     preflight_blocked: Option<String>,
+    update_pending: Option<UpdateRequest>,
+    update_version: Option<String>,
+    update_detail: Option<String>,
+    update_launched: bool,
+    update_handoff_unknown: bool,
 }
 
 impl UiState {
@@ -45,6 +56,11 @@ impl UiState {
             responses_open: connected,
             launch_status: LaunchStatus::Idle,
             preflight_blocked: None,
+            update_pending: None,
+            update_version: None,
+            update_detail: None,
+            update_launched: false,
+            update_handoff_unknown: false,
         }
     }
 
@@ -71,12 +87,86 @@ impl UiState {
     }
 
     pub(crate) fn can_start(&self, accepted: bool) -> bool {
-        accepted && !self.disconnected && !self.start_requested && self.phase() == UiPhase::Ready
+        accepted && self.ready_for_action()
+    }
+
+    pub(crate) fn ready_for_action(&self) -> bool {
+        !self.disconnected
+            && !self.start_requested
+            && self.phase() == UiPhase::Ready
+            && self.update_pending.is_none()
+            && !self.update_launched
+            && !self.update_handoff_unknown
+    }
+
+    pub(crate) fn can_check_update(&self) -> bool {
+        self.connected
+            && self.responses_open
+            && self.ready_for_action()
+            && matches!(self.operation, Operation::Repair | Operation::Modify)
+    }
+
+    pub(crate) fn can_download_update(&self) -> bool {
+        self.can_check_update() && self.update_version.is_some()
+    }
+
+    pub(crate) fn request_update(&mut self, download: bool) -> bool {
+        if !(if download {
+            self.can_download_update()
+        } else {
+            self.can_check_update()
+        }) {
+            return false;
+        }
+        self.update_pending = Some(if download {
+            UpdateRequest::Download
+        } else {
+            UpdateRequest::Check
+        });
+        self.update_detail = None;
+        self.clear_preflight_blocked();
+        true
+    }
+
+    pub(crate) fn update_pending(&self) -> Option<UpdateRequest> {
+        self.update_pending
+    }
+    pub(crate) fn update_version(&self) -> Option<&str> {
+        self.update_version.as_deref()
+    }
+    pub(crate) fn update_detail(&self) -> Option<&str> {
+        self.update_detail.as_deref()
+    }
+    pub(crate) fn update_launched(&self) -> bool {
+        self.update_launched
+    }
+
+    fn receive_update(
+        &mut self,
+        available_version: Option<String>,
+        detail: String,
+        launched: bool,
+    ) -> bool {
+        if !self.connected
+            || !self.responses_open
+            || self.disconnected
+            || self.start_requested
+            || self.snapshot.phase != UiPhase::Ready
+            || self.update_pending.is_none()
+            || (launched && self.update_pending != Some(UpdateRequest::Download))
+        {
+            return false;
+        }
+        self.update_pending = None;
+        self.update_version = available_version;
+        self.update_detail = Some(detail);
+        self.update_launched = launched;
+        true
     }
 
     /// A maintenance tab change remains local until Start freezes the intent.
     pub(crate) fn set_operation(&mut self, operation: Operation) -> bool {
-        if self.disconnected || self.start_requested || self.phase() != UiPhase::Ready {
+        if !self.ready_for_action() {
             return false;
         }
         self.operation = operation;
@@ -135,6 +225,11 @@ impl UiState {
 
     pub(crate) fn receive_response(&mut self, response: UiResponse) -> bool {
         match response {
+            UiResponse::UpdateStatus {
+                available_version,
+                detail,
+                launched,
+            } => self.receive_update(available_version, detail, launched),
             UiResponse::PreflightBlocked { detail } => self.reject_start(detail),
             UiResponse::LaunchResult { succeeded, detail } => {
                 if self.launch_status != LaunchStatus::Pending {
@@ -174,6 +269,15 @@ impl UiState {
             return false;
         }
         self.responses_open = false;
+        let pending_update = self.update_pending.take();
+        if pending_update.is_some() {
+            self.update_detail = Some("更新连接已关闭，请关闭此窗口后重新打开维护入口。 / Update connection closed. Close this window and reopen maintenance.".into());
+        }
+        if pending_update == Some(UpdateRequest::Download) {
+            // The child may already have started. Do not allow a concurrent
+            // maintenance operation when handoff acknowledgement was lost.
+            self.update_handoff_unknown = true;
+        }
         if self.launch_status != LaunchStatus::Succeeded {
             self.launch_status = LaunchStatus::Unavailable;
         }
@@ -258,6 +362,85 @@ impl UiState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updates_are_ready_only_and_do_not_change_task_snapshots() {
+        let mut state = UiState::for_operation(true, Operation::Repair);
+        let original = state.snapshot().clone();
+        assert!(!state.request_update(true));
+        assert!(state.request_update(false));
+        assert!(!state.request_update(false));
+        assert!(!state.request_start(true));
+        assert!(!state.set_operation(Operation::Modify));
+        assert!(state.may_close());
+        assert!(state.receive_response(UiResponse::UpdateStatus {
+            available_version: Some("2.0.0".into()),
+            detail: "Available".into(),
+            launched: false
+        }));
+        assert!(state.can_start(true));
+        assert!(state.request_update(true));
+        assert!(!state.request_start(true));
+        assert!(state.receive_response(UiResponse::UpdateStatus {
+            available_version: Some("2.0.0".into()),
+            detail: "Started".into(),
+            launched: true
+        }));
+        assert!(!state.can_start(true));
+        assert!(!state.request_update(false));
+        assert!(state.may_close());
+        assert_eq!(state.snapshot(), &original);
+    }
+
+    #[test]
+    fn update_error_can_retry_but_late_feedback_cannot_revive_a_task() {
+        let mut state = UiState::for_operation(true, Operation::Modify);
+        let failed = UiResponse::UpdateStatus {
+            available_version: None,
+            detail: "Network failed".into(),
+            launched: false,
+        };
+        assert!(!state.receive_response(failed.clone()));
+        assert!(state.request_update(false));
+        assert!(state.receive_response(failed.clone()));
+        assert!(state.request_update(false));
+        assert!(state.receive_response(failed.clone()));
+        assert!(state.request_start(true));
+        assert!(!state.receive_response(failed.clone()));
+        state.receive(snapshot(UiPhase::Failed));
+        assert!(!state.request_update(false));
+        assert!(!state.receive_response(failed));
+        assert_eq!(state.phase(), UiPhase::Failed);
+    }
+
+    #[test]
+    fn update_handoff_loss_disables_conflicting_maintenance_but_allows_close() {
+        let mut state = UiState::for_operation(true, Operation::Repair);
+        assert!(state.request_update(false));
+        state.receive_response(UiResponse::UpdateStatus {
+            available_version: Some("2.0.0".into()),
+            detail: String::new(),
+            launched: false,
+        });
+        assert!(state.request_update(true));
+        assert!(state.close_responses());
+        assert!(!state.can_start(true));
+        assert!(state.may_close());
+        assert_eq!(state.phase(), UiPhase::Ready);
+    }
+
+    #[test]
+    fn non_maintenance_and_demo_views_cannot_request_updates() {
+        for operation in [
+            Operation::Install,
+            Operation::Upgrade,
+            Operation::Uninstall,
+            Operation::Recover,
+        ] {
+            assert!(!UiState::for_operation(true, operation).request_update(false));
+        }
+        assert!(!UiState::for_operation(false, Operation::Repair).request_update(false));
+    }
 
     #[test]
     fn uninstall_never_accepts_cancel_or_launch_even_after_success() {

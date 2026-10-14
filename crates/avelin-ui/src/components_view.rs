@@ -70,7 +70,10 @@ impl InstallerView {
     }
 
     pub(super) fn set_component(&mut self, id: &str, selected: bool, cx: &mut Context<Self>) {
-        if !self.has_component_choices() || !self.picker.can_edit(self.phase()) {
+        if !self.has_component_choices()
+            || !self.picker.can_edit(self.phase())
+            || !self.state.ready_for_action()
+        {
             return;
         }
         let Some(component) = self
@@ -118,6 +121,7 @@ impl InstallerView {
         self.accepted = false;
         self.migration_confirmed = false;
         self.status_note = None;
+        self.content_scroll.set_offset(point(px(0.), px(0.)));
         window.set_window_title(&window_title(&self.options));
         cx.notify();
     }
@@ -139,7 +143,7 @@ impl InstallerView {
     }
 
     pub(super) fn render_components(&self, cx: &mut Context<Self>) -> AnyElement {
-        let editable = self.picker.can_edit(self.phase());
+        let editable = self.picker.can_edit(self.phase()) && self.state.ready_for_action();
         let muted = if self.options.dark {
             rgb(0xa7b5ae)
         } else {
@@ -211,7 +215,7 @@ impl InstallerView {
             .child(
                 Button::new("maintenance-repair")
                     .label(self.localized("修复安装", "Repair installation"))
-                    .disabled(self.repair() || self.phase() != UiPhase::Ready)
+                    .disabled(self.repair() || !self.state.ready_for_action())
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.switch_maintenance(Operation::Repair, window, cx)
                     })),
@@ -219,7 +223,7 @@ impl InstallerView {
             .child(
                 Button::new("maintenance-modify")
                     .label(self.localized("更改组件", "Change components"))
-                    .disabled(self.modify() || self.phase() != UiPhase::Ready)
+                    .disabled(self.modify() || !self.state.ready_for_action())
                     .on_click(cx.listener(|view, _, window, cx| {
                         view.switch_maintenance(Operation::Modify, window, cx)
                     })),

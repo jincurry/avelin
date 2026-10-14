@@ -30,51 +30,13 @@ pub fn validate_backend(backend: &PinnedFile, manifest: &Manifest) -> Result<()>
     Ok(())
 }
 
-fn shell_folder(kind: ShortcutKind) -> Result<PathBuf> {
-    #[link(name = "shell32")]
-    unsafe extern "system" {
-        fn SHGetFolderPathW(
-            window: *mut std::ffi::c_void,
-            folder: i32,
-            token: *mut std::ffi::c_void,
-            flags: u32,
-            path: *mut u16,
-        ) -> i32;
-    }
-    let mut path = [0u16; 260];
-    let folder = match kind {
-        ShortcutKind::Desktop => 0x10,
-        ShortcutKind::StartMenu => 0x02,
-    };
-    let status = unsafe {
-        SHGetFolderPathW(
-            std::ptr::null_mut(),
-            folder,
-            std::ptr::null_mut(),
-            0,
-            path.as_mut_ptr(),
-        )
-    };
-    ensure!(
-        status >= 0,
-        "resolve current-user shortcut folder: HRESULT {status:#x}"
-    );
-    let length = path
-        .iter()
-        .position(|c| *c == 0)
-        .context("invalid shell folder path")?;
-    let path = PathBuf::from(String::from_utf16(&path[..length])?);
-    ensure!(
-        path.is_absolute() && path.is_dir(),
-        "shortcut folder is unavailable"
-    );
-    reject_reparse(&path)?;
-    Ok(path)
-}
-
-pub fn shortcut_path(app_id: &str, kind: ShortcutKind) -> Result<PathBuf> {
+pub fn shortcut_path(
+    scope: avelin_core::InstallScope,
+    app_id: &str,
+    kind: ShortcutKind,
+) -> Result<PathBuf> {
     avelin_core::safe_id(app_id)?;
-    Ok(shell_folder(kind)?.join(format!("{app_id}.lnk")))
+    Ok(avelin_core::scope::shortcut_folder(scope, kind)?.join(format!("{app_id}.lnk")))
 }
 
 pub fn planned_shortcuts(
@@ -89,7 +51,7 @@ pub fn planned_shortcuts(
         (ShortcutKind::StartMenu, start_menu),
     ] {
         if selected {
-            let path = shortcut_path(&manifest.app_id, kind)?;
+            let path = shortcut_path(manifest.install_scope, &manifest.app_id, kind)?;
             reject_reparse(&path)?;
             ensure!(
                 !path.exists(),
@@ -117,11 +79,17 @@ pub fn validate_receipt(
     ensure!(
         receipt.app_id == manifest.app_id
             && receipt.app_version == manifest.app_version
-            && receipt.user_sid == user_sid
+            && receipt.install_scope == manifest.install_scope
             && receipt.manifest_sha256 == hash_bytes(&serde_json::to_vec(manifest)?)
             && same_path(Path::new(&receipt.install_dir), target),
         "receipt identity, ownership or file inventory mismatch"
     );
+    avelin_core::scope::validate_owned_installation(
+        manifest.install_scope,
+        target,
+        &receipt.user_sid,
+        user_sid,
+    )?;
     let mut seen = BTreeSet::new();
     for shortcut in &receipt.shortcuts {
         ensure!(
@@ -131,11 +99,11 @@ pub fn validate_receipt(
         ensure!(
             same_path(
                 Path::new(&shortcut.path),
-                &shortcut_path(&manifest.app_id, shortcut.kind)?
+                &shortcut_path(manifest.install_scope, &manifest.app_id, shortcut.kind)?
             ) && same_path(Path::new(&shortcut.target), &target.join(&manifest.entry))
                 && shortcut.sha256.len() == 64
                 && shortcut.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
-            "shortcut ownership record is outside this product's current-user destinations"
+            "shortcut ownership record is outside this product's scoped destinations"
         );
     }
     Ok(())
@@ -471,6 +439,7 @@ mod tests {
         let manifest = fixture.manifest();
         fs::write(fixture.0.join(&manifest.entry), b"abc").unwrap();
         let mut receipt = Receipt {
+            install_scope: manifest.install_scope,
             selected_components: vec![],
             schema_version: 1,
             app_id: manifest.app_id.clone(),

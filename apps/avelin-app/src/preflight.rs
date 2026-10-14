@@ -12,6 +12,56 @@ use avelin_core::{
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Runtime requirements gate operations which deploy application bytes. Removing
+/// an application or recovering an interrupted transaction remains possible.
+pub fn prerequisites(
+    args: &Args,
+    manifest: &Manifest,
+) -> Result<Option<avelin_core::prerequisites::PrerequisiteReport>> {
+    if matches!(args.operation, Operation::Uninstall | Operation::Recover)
+        || manifest.prerequisites.is_empty()
+    {
+        return Ok(None);
+    }
+    let report = if manifest.install_scope.is_current_user() {
+        avelin_core::prerequisites::inspect(&manifest.prerequisites)?
+    } else {
+        avelin_core::prerequisites::inspect_for_machine(&manifest.prerequisites)?
+    };
+    Ok((!report.is_satisfied()).then_some(report))
+}
+
+pub fn save_prerequisites(
+    args: &Args,
+    report: &avelin_core::prerequisites::PrerequisiteReport,
+) -> Result<i32> {
+    use std::io::Write;
+    let directory = crate::execution_files::create_private_session(
+        &std::env::temp_dir().join("AvelinM0"),
+        "prerequisites",
+    )?;
+    let path = std::path::absolute(
+        args.report
+            .clone()
+            .unwrap_or_else(|| directory.path().join("report.json")),
+    )?;
+    let _parent =
+        crate::execution_files::PinnedDirectory::open(path.parent().context("report parent")?)?;
+    avelin_core::reject_reparse(&path)?;
+    let value = serde_json::json!({"schema_version":1,"result":"NotStarted","coordinator_exit_code":3,
+        "operation":avelin_core::Operation::from(args.operation),"install_dir":args.install_dir,
+        "diagnostic":{"code":"AVELIN_PREREQUISITES_UNSATISFIED"},"message":report.blocking_detail(args.english),
+        "prerequisites":report,"report_path":path,"worker_started":false});
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(&serde_json::to_vec_pretty(&value)?)?;
+    file.sync_all()?;
+    println!("{value}");
+    Ok(3)
+}
+
 pub fn inspect_with_backend(
     args: &Args,
     manifest: &Manifest,
@@ -47,11 +97,11 @@ fn inspect(args: &Args, manifest: &Manifest) -> Result<UsageReport> {
     if args.operation == Operation::Recover {
         return Ok(UsageReport::default());
     }
-    let target = args.install_dir.clone().unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_default())
-            .join(&manifest.directory_name)
-    });
+    let target = args.install_dir.clone().map(Ok).unwrap_or_else(|| {
+        avelin_core::scope::default_install_root(manifest.install_scope, &manifest.directory_name)
+    })?;
     avelin_core::install_root(&target)?;
+    avelin_core::scope::validate_target(manifest.install_scope, &target)?;
     let sid = crate::transport::current_user_sid()?;
     let selection = crate::component_selection::resolve(
         manifest,
@@ -104,7 +154,11 @@ fn inspect(args: &Args, manifest: &Manifest) -> Result<UsageReport> {
             ),
         ] {
             if enabled {
-                paths.push(resources::shortcut_path(&manifest.app_id, kind)?);
+                paths.push(resources::shortcut_path(
+                    manifest.install_scope,
+                    &manifest.app_id,
+                    kind,
+                )?);
             }
         }
     }

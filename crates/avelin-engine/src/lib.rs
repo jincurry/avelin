@@ -57,7 +57,11 @@ pub fn execute(
     if request.plan.operation == avelin_core::Operation::Recover {
         return recovery::execute(request, observer);
     }
-    let _lock = recovery::ProductLock::acquire(&request.plan.app_id, &request.plan.user_sid)?;
+    let _lock = recovery::ProductLock::acquire(
+        request.plan.install_scope,
+        &request.plan.app_id,
+        &request.plan.user_sid,
+    )?;
     transaction::execute(request, observer)
 }
 

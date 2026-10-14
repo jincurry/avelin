@@ -49,13 +49,8 @@ pub fn pending_session(manifest: &Manifest, target: &Path) -> Result<Option<Path
 /// The retained coordinator lock also covers a task interrupted before it could
 /// create the target marker. Treat its session as untrusted discovery data.
 pub fn pending_session_from_lock(manifest: &Manifest, sid: &str) -> Result<Option<PathBuf>> {
-    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA missing")?)
-        .join("Avelin/M0/locks");
-    let path = base.join(format!(
-        "{}-{}.lock",
-        manifest.app_id,
-        &hash_bytes(sid.as_bytes())[..16]
-    ));
+    let path =
+        avelin_core::scope::product_lock_path(manifest.install_scope, &manifest.app_id, sid)?;
     reject_reparse(&path)?;
     if !path.try_exists()? {
         return Ok(None);
@@ -223,7 +218,7 @@ fn repair_inputs_impl(
             }
         }
     }
-    match upgrade::registration(&manifest.app_id)? {
+    match upgrade::registration(manifest.install_scope, &manifest.app_id)? {
         Some(registration) => {
             upgrade::verify_registration(&registration, manifest, target)
                 .context("existing application registration differs; refusing to overwrite it")?;

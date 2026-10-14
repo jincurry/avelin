@@ -7,10 +7,21 @@
 | `model.schema.json` | 引用 `#/$defs/Manifest`、`#/$defs/InstallPlan`、`#/$defs/Receipt`、`#/$defs/ShortcutRecord`、`#/$defs/UpgradePlan`、`#/$defs/UpgradeDiff` |
 | `protocol.schema.json` | 引用 `#/$defs/TaskCommand`、`#/$defs/TaskSnapshot`、`#/$defs/TaskResponse`、`#/$defs/BackendEvent` |
 | `presentation.schema.json` | 可直接验证 `Manifest.presentation` |
+| `updates.schema.json` | HTTPS 完整包更新 feed；摘要不是发布者签名 |
 | `examples/*.json` | 最小模型、命令、快照与事件样例 |
 | `presentation.example.json` | 默认模板及部分语言覆盖示例 |
 
 JSON Schema 只验证结构和可表达的字段约束。Windows 路径、PNG 完整解码、占位符、跨字段计数、manifest 摘要、真实资源归属和当前用户必须继续由 Rust 实现验证。模型 schema 的 50 000 是保留的解析上限，不是当前产品容量或本轮测试目标。
+
+## Windows 部署字段
+
+schema 2 增加可省略的 `Manifest.prerequisites`、`Manifest.updates` 和 Manifest / InstallPlan / Receipt 的 `install_scope`。默认空要求、无更新源、`current_user`，序列化时省略默认值，旧字节与摘要兼容；schema 1 不接受全用户范围、非空前置要求或更新配置。新字段不是旧运行时的兼容承诺。
+
+`prerequisites` 最多三项，每个 `kind` 只能出现一次；VC++/WebView2 四段数字，.NET Desktop 三段数字且匹配相同 major.minor。重复类型、真实注册信息和详细版本语义仍由 Rust 验证。`updates.feed_url` 绑定 HTTPS 元数据源，`channel` 默认为 `stable`。更新 feed 的版本优先级、平台、产品、跳转链、文件大小及真实 Setup 内容还须执行校验。
+
+`examples/windows-manifest.json` 展示这些新字段；`examples/update-release.json` 只作结构演示，地址和摘要不能用于真实下载。全用户范围的 Program Files、管理员令牌、HKLM 与公共快捷方式归属由执行层核验，单独填写 `all_users` 不授予机器级写权限。使用和发布规则见[Windows 部署指南](../windows-deployment.md)。
+
+维护窗口新增无外部路径/URL参数的 `check_for_updates`、`download_update` 意图。`update_status` 响应包含可空/省略的 `available_version`、`detail` 和 `launched`，表示网络或新 Setup 启动反馈，不改写当前安装事务终态。只在允许的维护状态处理这些意图；收到意图并不授权跳过校验或后台静默安装。
 
 ## 可选组件与 schema 版本
 

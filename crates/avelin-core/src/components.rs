@@ -253,6 +253,10 @@ impl Receipt {
     pub fn validate_manifest(&self, manifest: &Manifest) -> Result<()> {
         manifest.validate()?;
         ensure!(
+            self.install_scope == manifest.install_scope,
+            "receipt installation scope differs from manifest"
+        );
+        ensure!(
             self.schema_version == manifest.schema_version
                 && matches!(self.schema_version, SCHEMA_VERSION | RECEIPT_SCHEMA_VERSION),
             "receipt schema does not match manifest"

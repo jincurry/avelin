@@ -9,6 +9,7 @@
 | [兼容约定](compatibility.md) | 支持范围、升级、卸载、退出码与恢复边界 |
 | [恢复、修复与组件更改](maintenance.md) | 中断恢复、同版本维护、冲突保留与备份 |
 | [Windows 维护入口与占用检查](windows-maintenance.md) | 从系统更改入口维护、离线载荷复用、关闭应用后重新检查 |
+| [Windows 部署能力](windows-deployment.md) | 前置运行库检测、HTTPS 完整包更新、全用户安装与 UAC |
 | [开发指南](development.md) | 从新克隆准备环境、检查、构建与 CI |
 | [架构](architecture.md) | 代码职责、执行路径与状态模型 |
 | [模型与协议](schemas/README.md) | 本地 JSON Schema 与样例 |

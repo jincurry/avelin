@@ -20,8 +20,8 @@ flowchart LR
 ## 阅读顺序
 
 1. `apps/avelin-cli/src/main.rs`：工具命令；`init.rs` 生成配置，`components.rs` 解析组件，`config.rs` 读取配置，`build_output.rs` 保护输出，`native_builder.rs` 打包 Rust worker 与载荷。
-2. `crates/avelin-core/src/`：配置、载荷、包格式、安装记录、计划和协议；`components.rs` 验证文件归属、组件选择与旧记录迁移。
-3. `apps/avelin-app/src/coordinator.rs`：会话、任务锁、后端进程、GUI/静默流程和结果核验；`component_selection.rs` 解析默认、继承、显式及维护选集。
+2. `crates/avelin-core/src/`：配置、载荷、包格式、安装记录、计划和协议；`components.rs` 验证文件归属、组件选择与旧记录迁移；`prerequisites.rs` 检测运行库，`updates.rs` 验证 HTTPS 更新，`scope.rs` 约束用户/机器范围。
+3. `apps/avelin-app/src/coordinator.rs`：会话、任务锁、后端进程、GUI/静默流程和结果核验；`component_selection.rs` 解析默认、继承、显式及维护选集；`elevation.rs` 处理受控 UAC 入口，`online_update.rs` 核验新包并交接已有升级页。
 4. `crates/avelin-engine/src/`：Rust worker、部署事务、文件归属、系统入口和恢复日志。
 5. `crates/avelin-ui/src/`：界面和输入行为。
 
@@ -31,9 +31,9 @@ flowchart LR
 
 | 数据 | 作用 |
 |---|---|
-| Manifest | 包里的身份、版本、全部组件及文件归属、载荷摘要和展示资源 |
-| InstallPlan / UpgradePlan | 当前任务操作、冻结选集及核验过的升级/更改差异 |
-| Receipt | 已提交安装的身份、版本、实际选集与资源归属、提交关联 |
+| Manifest | 包里的身份、版本、安装范围、全部组件及文件归属、载荷摘要、展示资源、可选运行库与更新源 |
+| InstallPlan / UpgradePlan | 当前任务操作、安装范围、冻结选集及核验过的升级/更改差异 |
+| Receipt | 已提交安装的身份、版本、范围、实际选集与资源归属、提交关联 |
 
 任务日志描述执行中的变更，receipt 描述已提交状态，两者不可互代。UI 快照用于显示，不能充当磁盘成功证据。字段见[本地 schemas](schemas/README.md)。
 
@@ -48,6 +48,10 @@ Rust 包的外层仍为 runtime + backend + manifest；backend 是 x64 Rust work
 系统维护入口由 `ModifyPath` 指向已安装 runtime 的 `--maintenance`。`installed_maintenance.rs` 核对安装记录、manifest、完整 worker 载荷和 runtime，复制到新的私有目录后释放安装源句柄，再交给既有协调器。原安装输入不完整时拒绝并提示使用原始 Setup 与保留会话，不能绕过归属校验。
 
 `preflight.rs` 在普通操作启动 worker 前确定目标资源；`avelin-core/resource_usage.rs` 通过 Windows Restart Manager 和文件访问探测产生只读占用结果。GUI 收到 `PreflightBlocked` 后允许重新检查，静默输出 `NotStarted` 报告。检查不会结束进程，也不保证之后无新占用；执行层继续处理实际冲突。恢复使用原任务证据，不能把部分 receipt 当成完整安装做普通预检。
+
+前置运行库由固定类型和最低版本声明，执行前只读查询微软登记；缺失/无法查询时阻止启动，提示官方获取方式。更新只在用户请求时由 WinHTTP 访问包内固定 HTTPS feed，受大小、重定向、TLS、版本及产品约束；完整新包使用同目录原子新建发布并持有防改写句柄。下载器不执行包，维护协调器另核验安装范围和更新源不变、旧安装仍有效，再打开新 Setup 的升级确认页。原任务终态不表示新升级成功。
+
+`current_user` 保持旧 SID 和 HKCU 资源边界；`all_users` 由系统 API 确定 Program Files、公共快捷方式与机器状态目录，要求提升的管理员令牌，使用 HKLM 登记及机器级互斥。范围写入 manifest/plan/receipt 并跨升级保持。省略新字段的旧记录继续按当前用户解释，不能凭运行管理员身份改写为全用户归属。
 
 升级先暂存和备份，执行变更后最后提交完整 receipt。多文件与注册表变更不是一个原子事务；有限进程内恢复无法确认时返回 Unknown 并保留证据。失联不会直接解释为已取消或成功。
 

@@ -23,6 +23,46 @@ const REPARSE: u32 = 0x400;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 type Handle = *mut c_void;
 
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    descriptor: Handle,
+    inherit: i32,
+}
+
+/// A public machine file is readable by users, but must not inherit deletion
+/// or write grants from public shell folders. Supply this at CREATE_NEW, before
+/// any bytes are exposed; changing the DACL after publication leaves a race.
+/// This cannot override a shared parent folder's separate FILE_DELETE_CHILD
+/// policy. Such an external deletion is treated as missing content by repair;
+/// file hashes still prevent adopting a modified replacement.
+struct MachineFileSecurity(Handle);
+impl MachineFileSecurity {
+    fn new() -> Result<Self> {
+        let mut descriptor = ptr::null_mut();
+        ensure!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    wide("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)").as_ptr(),
+                    1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            } != 0,
+            "construct protected machine file security: {}",
+            std::io::Error::last_os_error()
+        );
+        Ok(Self(descriptor))
+    }
+}
+impl Drop for MachineFileSecurity {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CleanupIncomplete {
     operation: anyhow::Error,
@@ -83,6 +123,17 @@ unsafe extern "system" {
     fn SetFileInformationByHandle(file: Handle, class: u32, data: *const c_void, size: u32) -> i32;
     fn GetDriveTypeW(root: *const u16) -> u32;
     fn CreateDirectoryW(name: *const u16, security: *const c_void) -> i32;
+    fn LocalFree(memory: Handle) -> Handle;
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text: *const u16,
+        revision: u32,
+        descriptor: *mut Handle,
+        size: *mut u32,
+    ) -> i32;
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -129,6 +180,21 @@ fn checked_path(text: &str) -> Result<PathBuf> {
 }
 
 fn open(path: &Path, access: u32, creation: u32, flags: u32) -> Result<File> {
+    open_with_security(path, access, creation, flags, None)
+}
+
+fn open_with_security(
+    path: &Path,
+    access: u32,
+    creation: u32,
+    flags: u32,
+    security: Option<&MachineFileSecurity>,
+) -> Result<File> {
+    let attributes = security.map(|security| SecurityAttributes {
+        length: std::mem::size_of::<SecurityAttributes>() as u32,
+        descriptor: security.0,
+        inherit: 0,
+    });
     let name = wide(&format!(
         r"\\?\{}",
         path.to_str().context("non-Unicode path")?
@@ -138,7 +204,9 @@ fn open(path: &Path, access: u32, creation: u32, flags: u32) -> Result<File> {
             name.as_ptr(),
             access,
             SHARE_READ,
-            ptr::null(),
+            attributes.as_ref().map_or(ptr::null(), |value| {
+                (value as *const SecurityAttributes).cast()
+            }),
             creation,
             flags | OPEN_REPARSE_POINT,
             ptr::null_mut(),
@@ -305,6 +373,32 @@ pub(crate) fn remove_empty_directory_owned(path: &str, identity: &str) -> Result
 /// hash is checked before creating anything. The returned digest describes
 /// bytes created by this call, not a later pathname lookup.
 pub fn publish(source: &str, destination: &str, expected: &str) -> Result<String> {
+    publish_with_security(source, destination, expected, None)
+}
+
+/// Deployment and restoration of installed resources use the same explicit
+/// scope. Staging/backup evidence deliberately keeps the private session ACL.
+pub(crate) fn publish_managed(
+    scope: avelin_core::InstallScope,
+    source: &str,
+    destination: &str,
+    expected: &str,
+) -> Result<String> {
+    avelin_core::scope::require_elevation(scope)?;
+    let security = if scope == avelin_core::InstallScope::AllUsers {
+        Some(MachineFileSecurity::new()?)
+    } else {
+        None
+    };
+    publish_with_security(source, destination, expected, security.as_ref())
+}
+
+fn publish_with_security(
+    source: &str,
+    destination: &str,
+    expected: &str,
+    security: Option<&MachineFileSecurity>,
+) -> Result<String> {
     if !expected.is_empty() {
         validate_hash(expected)?;
     }
@@ -320,7 +414,7 @@ pub fn publish(source: &str, destination: &str, expected: &str) -> Result<String
         "source hash mismatch"
     );
     input.seek(SeekFrom::Start(0))?;
-    let mut output = open(&destination, READ | WRITE | DELETE, 1, 0)?;
+    let mut output = open_with_security(&destination, READ | WRITE | DELETE, 1, 0, security)?;
     let result = (|| {
         regular(&output)?;
         std::io::copy(&mut input, &mut output)?;
@@ -532,11 +626,87 @@ mod tests {
         remove_empty_directory(replacement.to_str().unwrap()).unwrap();
     }
     #[test]
+    fn machine_publication_protects_files_at_creation_and_rejects_unelevated_writes() {
+        let f = Fixture::new();
+        fs::write(f.name("source"), b"machine shortcut fixture").unwrap();
+        let scope = avelin_core::InstallScope::AllUsers;
+        if !avelin_core::scope::is_elevated().unwrap() {
+            assert!(publish_managed(scope, &f.name("source"), &f.name("target"), "").is_err());
+            assert!(!Path::new(&f.name("target")).exists());
+            return;
+        }
+
+        // Reproduce a shell-folder policy with an inheritable ordinary-user
+        // delete/write grant. Only this newly created fixture is changed.
+        let grant = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:AVELIN_ACL_FIXTURE
+$sid = [Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $env:AVELIN_ACL_FIXTURE -AclObject $acl
+"#])
+            .env("AVELIN_ACL_FIXTURE", &f.0)
+            .output()
+            .unwrap();
+        assert!(
+            grant.status.success(),
+            "{}",
+            String::from_utf8_lossy(&grant.stderr)
+        );
+        let hash = publish_managed(scope, &f.name("source"), &f.name("target"), "").unwrap();
+        assert_eq!(hash, avelin_core::hash_bytes(b"machine shortcut fixture"));
+        let inspect = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", r#"
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $env:AVELIN_ACL_TARGET
+if (-not $acl.AreAccessRulesProtected) { throw 'DACL inheritance remains enabled' }
+if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544') { throw 'Unexpected owner' }
+$userRead = $false
+foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+    if ($rule.IsInherited) { throw 'Parent permission was inherited' }
+    if ($rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 0x500D0156) -ne 0 -and $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Ordinary user has write/delete access' }
+    if ($rule.IdentityReference.Value -eq 'S-1-5-32-545' -and $rule.AccessControlType -eq 'Allow' -and ([long]$rule.FileSystemRights -band 0x1200A9) -eq 0x1200A9) { $userRead = $true }
+}
+if (-not $userRead) { throw 'Public file is not readable/executable by users' }
+"#])
+            .env("AVELIN_ACL_TARGET", f.name("target"))
+            .output()
+            .unwrap();
+        assert!(
+            inspect.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspect.stderr)
+        );
+        assert!(publish_managed(scope, &f.name("source"), &f.name("target"), "").is_err());
+        assert!(
+            publish_managed(
+                scope,
+                &f.name("source"),
+                &f.name("hardlink"),
+                &"0".repeat(64)
+            )
+            .is_err()
+        );
+        assert!(!Path::new(&f.name("hardlink")).exists());
+        assert_eq!(delete(&f.name("target"), &hash).unwrap(), "deleted");
+    }
+
+    #[test]
     fn publication_refuses_existing_destination_and_wrong_source_hash() {
         let f = Fixture::new();
         fs::write(f.name("source"), b"new").unwrap();
         fs::write(f.name("target"), b"user data").unwrap();
-        assert!(publish(&f.name("source"), &f.name("target"), "").is_err());
+        assert!(
+            publish_managed(
+                avelin_core::InstallScope::CurrentUser,
+                &f.name("source"),
+                &f.name("target"),
+                ""
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(f.name("target")).unwrap(), b"user data");
         assert!(publish(&f.name("source"), &f.name("hardlink"), &"0".repeat(64)).is_err());
         assert!(!Path::new(&f.name("hardlink")).exists());

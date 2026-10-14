@@ -21,6 +21,10 @@ pub struct Config {
     ui: Option<crate::presentation_config::UiConfig>,
     #[serde(default)]
     components: Option<Vec<ComponentConfig>>,
+    #[serde(default)]
+    prerequisites: Vec<avelin_core::prerequisites::Requirement>,
+    #[serde(default)]
+    updates: Option<avelin_core::updates::UpdateConfig>,
 }
 
 #[derive(Deserialize)]
@@ -145,6 +149,8 @@ struct Payload {
 struct Install {
     directory_name: String,
     #[serde(default)]
+    scope: avelin_core::InstallScope,
+    #[serde(default)]
     desktop_shortcut: bool,
     #[serde(default)]
     start_menu_shortcut: bool,
@@ -204,6 +210,13 @@ pub(crate) fn load_text(config_directory: &Path, text: &str) -> Result<(PathBuf,
         "config schema 2 requires explicit components"
     );
     let source = config_directory.join(cfg.payload.directory);
+    ensure!(
+        cfg.schema_version != SCHEMA_VERSION
+            || (cfg.install.scope.is_current_user()
+                && cfg.prerequisites.is_empty()
+                && cfg.updates.is_none()),
+        "scope, prerequisites and updates require config schema 2"
+    );
     reject_reparse(&std::path::absolute(&source)?)?;
     ensure!(
         source.is_dir(),
@@ -218,6 +231,9 @@ pub(crate) fn load_text(config_directory: &Path, text: &str) -> Result<(PathBuf,
     let components = assign_components(cfg.components, &mut files)?;
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,
+        install_scope: cfg.install.scope,
+        prerequisites: cfg.prerequisites,
+        updates: cfg.updates,
         components,
         app_id: cfg.app.id,
         app_name: cfg.app.name,

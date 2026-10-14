@@ -53,6 +53,8 @@ pub struct ShortcutRecord {
 #[serde(deny_unknown_fields)]
 pub struct InstallPlan {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "crate::InstallScope::is_current_user")]
+    pub install_scope: crate::InstallScope,
     pub task_id: String,
     pub operation: Operation,
     pub app_id: String,
@@ -106,6 +108,7 @@ impl InstallPlan {
     ) -> Result<Self> {
         let mut plan = Self {
             schema_version: manifest.schema_version,
+            install_scope: manifest.install_scope,
             task_id,
             operation,
             app_id: manifest.app_id.clone(),
@@ -245,7 +248,9 @@ impl InstallPlan {
             .expect("validated maintenance context");
         ensure!(
             self.install_dir == std::path::Path::new(&receipt.install_dir)
-                && self.user_sid == receipt.user_sid
+                && self.install_scope == receipt.install_scope
+                && (self.install_scope == crate::InstallScope::AllUsers
+                    || self.user_sid == receipt.user_sid)
                 && self.task_id != receipt.task_id
                 && context.previous_receipt_sha256 == digest,
             "maintenance plan does not match the previous receipt or fresh task"
@@ -299,6 +304,10 @@ impl InstallPlan {
     /// validated independently by the coordinator and worker.
     pub fn validate(&self, manifest: &Manifest) -> Result<()> {
         manifest.validate()?;
+        ensure!(
+            self.install_scope == manifest.install_scope,
+            "plan installation scope differs from manifest"
+        );
         ensure!(
             self.schema_version == manifest.schema_version
                 && matches!(self.schema_version, SCHEMA_VERSION | PLAN_SCHEMA_VERSION),
@@ -543,6 +552,10 @@ impl UpgradePlan {
 
     fn validate_previous(&self, new: &Manifest, old: &Manifest, receipt: &Receipt) -> Result<()> {
         receipt.validate_manifest(old)?;
+        ensure!(
+            new.install_scope == old.install_scope,
+            "maintenance cannot change installation scope"
+        );
         ensure!(
             new.app_id == old.app_id && receipt.app_id == old.app_id,
             "maintenance application identity mismatch"

@@ -9,6 +9,7 @@ use gpui_kit::component::{
     input::{Copy, Cut, Escape, Input, InputEvent, InputState, Paste, SelectAll},
     native_menu::NativeMenu,
     progress::Progress,
+    scroll::{Scrollbar, ScrollbarMode},
 };
 #[cfg(test)]
 use gpui_kit::test::TestSupportExt;
@@ -17,12 +18,19 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::clipboard::{self, ClipboardAction, ClipboardEdit};
 use crate::interaction::DirectoryPicker;
-use crate::state::{LaunchStatus, UiState};
+use crate::state::{LaunchStatus, UiState, UpdateRequest};
 use crate::{Locale, Presentation, UiBridge, UiCommand, UiError, UiOptions, UiPhase};
 use avelin_core::Operation;
 
 #[path = "components_view.rs"]
 mod components_view;
+
+#[path = "updates_view.rs"]
+mod updates_view;
+
+#[cfg(test)]
+#[path = "updates_view_tests.rs"]
+mod updates_view_tests;
 
 #[cfg(test)]
 #[path = "components_view_tests.rs"]
@@ -450,6 +458,7 @@ struct InstallerView {
     _directory_subscription: Subscription,
     focus_handle: FocusHandle,
     picker: DirectoryPicker,
+    content_scroll: ScrollHandle,
     last_rendered_phase: UiPhase,
     desktop: bool,
     start_menu: bool,
@@ -500,7 +509,9 @@ impl InstallerView {
             },
         );
         let focus_handle = cx.focus_handle().tab_stop(false);
-        if options.operation == Operation::Install {
+        if options.operation == Operation::Install
+            && options.install_scope == avelin_core::InstallScope::CurrentUser
+        {
             directory.update(cx, |input, cx| input.focus(window, cx));
         } else {
             focus_handle.focus(window, cx);
@@ -529,6 +540,7 @@ impl InstallerView {
             _directory_subscription: directory_subscription,
             focus_handle,
             picker: DirectoryPicker::default(),
+            content_scroll: ScrollHandle::new(),
             last_rendered_phase: UiPhase::Ready,
             desktop,
             start_menu,
@@ -739,6 +751,29 @@ impl InstallerView {
         .to_owned()
     }
 
+    fn footer_status(&self) -> String {
+        if self.demo() {
+            self.text("footer.demo")
+        } else if self.uninstall() {
+            self.text("footer.uninstall")
+        } else if self.upgrade() {
+            self.text("footer.upgrade")
+        } else if self.maintenance() || self.modify() {
+            if self.options.install_scope == avelin_core::InstallScope::AllUsers {
+                self.localized(
+                    "所有用户 · 安装维护",
+                    "All users · Installation maintenance",
+                )
+            } else {
+                self.localized("安装维护", "Installation maintenance")
+            }
+        } else if self.options.install_scope == avelin_core::InstallScope::AllUsers {
+            self.localized("为所有用户安装", "All-users installation")
+        } else {
+            self.text("footer.install")
+        }
+    }
+
     fn repair_policy(&self) -> String {
         if self.options.repair_overwrite {
             self.localized(
@@ -755,6 +790,7 @@ impl InstallerView {
 
     fn fixed_directory(&self) -> bool {
         self.options.operation != Operation::Install
+            || self.options.install_scope == avelin_core::InstallScope::AllUsers
     }
 
     fn upgrade_versions(&self) -> String {
@@ -775,6 +811,7 @@ impl InstallerView {
 
     fn shows_launch(&self) -> bool {
         !self.demo()
+            && self.options.install_scope != avelin_core::InstallScope::AllUsers
             && !self.uninstall()
             && !self.recover()
             && !self.modify()
@@ -782,6 +819,9 @@ impl InstallerView {
     }
 
     fn launch(&mut self, cx: &mut Context<Self>) {
+        if self.options.install_scope == avelin_core::InstallScope::AllUsers {
+            return;
+        }
         if !self.state.request_launch() {
             return;
         }
@@ -1162,6 +1202,7 @@ impl InstallerView {
             return self.render_upgrade_confirmation(cx);
         }
         let editable = self.picker.can_edit(self.phase());
+        let directory_editable = editable && !self.fixed_directory();
         let menu_focus = self.directory.read(cx).focus_handle(cx);
         let menu_labels = DirectoryMenuLabels::new(&self.options.presentation, self.options.locale);
         let muted = if self.options.dark {
@@ -1198,12 +1239,12 @@ impl InstallerView {
                             }))
                             .child(
                                 Input::new(&self.directory)
-                                    .disabled(!editable)
+                                    .disabled(!directory_editable)
                                     .context_menu(move |menu, window, cx| {
                                         directory_context_menu(
                                             menu,
                                             &menu_focus,
-                                            editable,
+                                            directory_editable,
                                             &menu_labels,
                                             window,
                                             cx,
@@ -1213,18 +1254,29 @@ impl InstallerView {
                                     .aria_label(self.text("directory.aria")),
                             ),
                     )
-                    .child(
-                        Button::new("browse")
-                            .label(self.text("directory.browse"))
-                            .disabled(!editable)
-                            .on_click(cx.listener(|view, _, window, cx| view.browse(window, cx))),
-                    ),
+                    .when(!self.fixed_directory(), |row| {
+                        row.child(
+                            Button::new("browse")
+                                .label(self.text("directory.browse"))
+                                .disabled(!editable)
+                                .on_click(
+                                    cx.listener(|view, _, window, cx| view.browse(window, cx)),
+                                ),
+                        )
+                    }),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child(self.text("directory.hint")),
+                    .child(if self.fixed_directory() {
+                        self.localized(
+                            "全用户安装位置由安装包固定。",
+                            "The package fixes the all-users installation location.",
+                        )
+                    } else {
+                        self.text("directory.hint")
+                    }),
             )
             .when(self.has_component_choices(), |container| {
                 container.child(self.render_components(cx))
@@ -1749,12 +1801,29 @@ impl Render for InstallerView {
             )
             .child(
                 div()
-                    .id("content")
                     .flex_1()
                     .min_h_0()
+                    .relative()
+                    .child(div()
+                    .id("content")
+                    .map(|container| {
+                        #[cfg(test)]
+                        let container = container.test_support();
+                        container
+                    })
+                    .size_full()
                     .overflow_y_scroll()
+                    .track_scroll(&self.content_scroll)
                     .px_7()
                     .py_5()
+                    .when(self.options.install_scope == avelin_core::InstallScope::AllUsers, |container| {
+                        container.child(div().id("all-users-scope").mb_4().text_sm().whitespace_normal()
+                            .child(self.localized(
+                                "此应用供所有用户使用；安装与维护需要管理员权限。完成后请从公共快捷方式启动应用。",
+                                "This app is available to all users. Installation and maintenance require administrator permission. Launch the app from its shared shortcut after completion.",
+                            )))
+                    })
+                    .when(self.shows_updates(), |container| container.child(self.render_updates(cx)))
                     .when_some(self.state.preflight_blocked(), |container, detail| {
                         container.child(
                             div()
@@ -1806,7 +1875,14 @@ impl Render for InstallerView {
                                 .text_color(if dark { rgb(0xfbbf24) } else { rgb(0xb45309) })
                                 .child(self.text(notice.key())),
                         )
-                    }),
+                    }))
+                    // A visible thumb makes below-the-fold controls discoverable
+                    // while the action footer remains outside the scroll area.
+                    .child(div().absolute().inset_0().child(
+                        Scrollbar::vertical(&self.content_scroll)
+                            .id("content-scrollbar")
+                            .mode(ScrollbarMode::Always),
+                    )),
             )
             .child(
                 div()
@@ -1831,17 +1907,7 @@ impl Render for InstallerView {
                                     .font_family("Georgia")
                                     .child(self.text("footer.brand")),
                             )
-                            .child(div().text_xs().text_color(muted).child(if self.demo() {
-                                self.text("footer.demo")
-                            } else if self.uninstall() {
-                                self.text("footer.uninstall")
-                            } else if self.upgrade() {
-                                self.text("footer.upgrade")
-                            } else if self.maintenance() {
-                                self.localized("安装维护", "Installation maintenance")
-                            } else {
-                                self.text("footer.install")
-                            }))
+                            .child(div().text_xs().text_color(muted).child(self.footer_status()))
                             .when(
                                 main && self.has_component_choices() && !self.maintenance(),
                                 |container| {
@@ -1889,7 +1955,7 @@ impl Render for InstallerView {
                                         .on_click(cx.listener(|view, _, _, cx| view.start(cx))),
                                 )
                             })
-                            .when(phase.is_running() && !self.fixed_directory(), |row| {
+                            .when(phase.is_running() && self.options.operation == Operation::Install, |row| {
                                 row.child(
                                     Button::new("cancel")
                                         .label(self.text("action.cancel"))

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "app_id": "dev.avelin.components.example",
+  "version": "2.0.0",
+  "channel": "stable",
+  "platform": "windows-x64",
+  "setup_url": "https://downloads.example.com/Application-2.0.0-Setup.exe",
+  "size": 123456,
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

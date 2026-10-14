@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://avelin.dev/schemas/m1/updates.schema.json",
+  "title": "Avelin HTTPS update feed v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "app_id",
+    "version",
+    "channel",
+    "platform",
+    "setup_url",
+    "size",
+    "sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "app_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{1,100}$"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Strict SemVer; stable channel rejects prereleases. Build metadata is ignored for version precedence."
+    },
+    "channel": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,32}$"
+    },
+    "platform": {
+      "const": "windows-x64"
+    },
+    "setup_url": {
+      "type": "string",
+      "minLength": 9,
+      "maxLength": 8192,
+      "pattern": "^https://[^/\\s\\\\#@?]+(?:[/?][^\\s\\\\#]*)?$"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483648
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{64}$"
+    }
+  },
+  "description": "The configured HTTPS feed is the trust source. SHA-256 binds bytes to that feed, not publisher signing. Runtime validates redirects, full Setup structure, product/version and the existing install scope before handoff."
+}

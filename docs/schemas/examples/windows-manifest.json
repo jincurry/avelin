@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "app_id": "dev.avelin.components.example",
+  "app_name": "Example application",
+  "app_version": "1.0.0",
+  "entry": "Example.exe",
+  "directory_name": "AvelinComponentsExample",
+  "start_menu_shortcut": false,
+  "files": [
+    {
+      "path": "Example.exe",
+      "size": 3,
+      "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+      "component_id": "core"
+    },
+    {
+      "path": "extras\\data.txt",
+      "size": 5,
+      "sha256": "c8dee78f8c7b466c881847accc196998bad00e2b96c5ef913dfbe454d3807c96",
+      "component_id": "extra"
+    }
+  ],
+  "runtime_sha256": null,
+  "components": [
+    {
+      "id": "core",
+      "required": true,
+      "default_selected": true,
+      "name": {
+        "en-US": "Application",
+        "zh-CN": "主程序"
+      },
+      "description": {
+        "en-US": "Files required to run the application",
+        "zh-CN": "运行应用所需的文件"
+      }
+    },
+    {
+      "id": "extra",
+      "required": false,
+      "default_selected": false,
+      "name": {
+        "en-US": "Optional component",
+        "zh-CN": "可选组件"
+      },
+      "description": {
+        "en-US": "Additional application content",
+        "zh-CN": "可选安装的应用内容"
+      }
+    }
+  ],
+  "install_scope": "all_users",
+  "prerequisites": [
+    {
+      "kind": "vc_redist_x64",
+      "min_version": "14.38.33135.0"
+    },
+    {
+      "kind": "dotnet_desktop_x64",
+      "min_version": "8.0.0"
+    },
+    {
+      "kind": "webview2_evergreen",
+      "min_version": "120.0.0.0"
+    }
+  ],
+  "updates": {
+    "feed_url": "https://updates.example.com/application/stable.json",
+    "channel": "stable"
+  }
+}
